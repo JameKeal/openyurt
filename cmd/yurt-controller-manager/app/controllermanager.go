@@ -182,7 +182,7 @@ func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 		MaxHeaderBytes: 1 << 20,
 	}
 
-	if _, err := apiserver.RunServer(insecureServer, listener, 0, stopCh); err != nil {
+	if _, _, err := apiserver.RunServer(insecureServer, listener, 0, stopCh); err != nil {
 		klog.Fatalf("error run http server: %v", err)
 		return err
 	}
@@ -319,7 +319,7 @@ func CreateControllerContext(s *config.CompletedConfig, rootClientBuilder, clien
 	// If apiserver is not running we should wait for some time and fail only then. This is particularly
 	// important when we start apiserver and controller manager at the same time.
 	if err := genericcontrollermanager.WaitForAPIServer(versionedClient, 10*time.Second); err != nil {
-		return ControllerContext{}, fmt.Errorf("failed to wait for apiserver being healthy: %v", err)
+		return ControllerContext{}, fmt.Errorf("failed to wait for apiserver being healthy: %w", err)
 	}
 
 	ctx := ControllerContext{
