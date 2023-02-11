@@ -39,8 +39,10 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
+	poolcoordinatorCert "github.com/openyurtio/openyurt/pkg/controller/poolcoordinator/cert"
 	"github.com/openyurtio/openyurt/pkg/projectinfo"
-	"github.com/openyurtio/openyurt/pkg/util/certmanager"
+	"github.com/openyurtio/openyurt/pkg/yurthub/certificate/token"
+	"github.com/openyurtio/openyurt/pkg/yurttunnel/constants"
 )
 
 var (
@@ -72,6 +74,10 @@ var (
 		{
 			recognize:  isYurtTunnelAgentCert,
 			successMsg: "Auto approving yurt-tunnel-agent client certificate",
+		},
+		{
+			recognize:  isPoolCoordinatorClientCert,
+			successMsg: "Auto approving poolcoordinator-apiserver client certificate",
 		},
 	}
 )
@@ -358,16 +364,22 @@ func v1Csr2v1beta1Csr(csr *certificatesv1.CertificateSigningRequest) *certificat
 }
 
 func v1beta1Csr2v1Csr(csr *certificatesv1beta1.CertificateSigningRequest) *certificatesv1.CertificateSigningRequest {
+	if csr == nil {
+		return nil
+	}
 	v1Csr := &certificatesv1.CertificateSigningRequest{
 		ObjectMeta: csr.ObjectMeta,
 		Spec: certificatesv1.CertificateSigningRequestSpec{
-			Request:    csr.Spec.Request,
-			SignerName: *csr.Spec.SignerName,
-			Usages:     make([]certificatesv1.KeyUsage, 0),
+			Request: csr.Spec.Request,
+			Usages:  make([]certificatesv1.KeyUsage, 0),
 		},
 		Status: certificatesv1.CertificateSigningRequestStatus{
 			Conditions: make([]certificatesv1.CertificateSigningRequestCondition, 0),
 		},
+	}
+
+	if csr.Spec.SignerName != nil {
+		v1Csr.Spec.SignerName = *csr.Spec.SignerName
 	}
 
 	for _, usage := range csr.Spec.Usages {
@@ -425,7 +437,7 @@ func isYurtHubNodeCert(csr *certificatesv1.CertificateSigningRequest, x509cr *x5
 		return false
 	} else {
 		for _, org := range x509cr.Subject.Organization {
-			if org != certmanager.YurtHubCSROrg && org != user.NodesGroup && !strings.HasPrefix(org, yurtHubNodeCertOrgPrefix) {
+			if org != token.YurtHubCSROrg && org != user.NodesGroup && !strings.HasPrefix(org, yurtHubNodeCertOrgPrefix) {
 				return false
 			}
 		}
@@ -448,11 +460,11 @@ func isYurtTunnelProxyClientCert(csr *certificatesv1.CertificateSigningRequest, 
 		return false
 	}
 
-	if len(x509cr.Subject.Organization) != 1 || x509cr.Subject.Organization[0] != certmanager.YurtTunnelCSROrg {
+	if len(x509cr.Subject.Organization) != 1 || x509cr.Subject.Organization[0] != constants.YurtTunnelCSROrg {
 		return false
 	}
 
-	if x509cr.Subject.CommonName != certmanager.YurtTunnelProxyClientCSRCN {
+	if x509cr.Subject.CommonName != constants.YurtTunnelProxyClientCSRCN {
 		return false
 	}
 
@@ -469,11 +481,28 @@ func isYurtTunnelAgentCert(csr *certificatesv1.CertificateSigningRequest, x509cr
 		return false
 	}
 
-	if len(x509cr.Subject.Organization) != 1 || x509cr.Subject.Organization[0] != certmanager.YurtTunnelCSROrg {
+	if len(x509cr.Subject.Organization) != 1 || x509cr.Subject.Organization[0] != constants.YurtTunnelCSROrg {
 		return false
 	}
 
-	if x509cr.Subject.CommonName != certmanager.YurtTunnelAgentCSRCN {
+	if x509cr.Subject.CommonName != constants.YurtTunnelAgentCSRCN {
+		return false
+	}
+
+	if !clientRequiredUsages.Equal(usagesToSet(csr.Spec.Usages)) {
+		return false
+	}
+
+	return true
+}
+
+// isYurtTunnelProxyClientCert is used to recognize csr from poolcoordinator client certificate .
+func isPoolCoordinatorClientCert(csr *certificatesv1.CertificateSigningRequest, x509cr *x509.CertificateRequest) bool {
+	if csr.Spec.SignerName != certificatesv1.KubeAPIServerClientSignerName {
+		return false
+	}
+
+	if len(x509cr.Subject.Organization) != 1 || x509cr.Subject.Organization[0] != poolcoordinatorCert.PoolcoordinatorOrg {
 		return false
 	}
 

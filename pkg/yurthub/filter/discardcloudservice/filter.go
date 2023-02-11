@@ -17,43 +17,75 @@ limitations under the License.
 package discardcloudservice
 
 import (
-	"io"
-	"net/http"
+	"fmt"
 
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
 	"github.com/openyurtio/openyurt/pkg/yurthub/filter"
-	filterutil "github.com/openyurtio/openyurt/pkg/yurthub/filter/util"
-	"github.com/openyurtio/openyurt/pkg/yurthub/kubernetes/serializer"
+)
+
+var (
+	cloudClusterIPService = map[string]struct{}{
+		"kube-system/x-tunnel-server-internal-svc": {},
+	}
 )
 
 // Register registers a filter
 func Register(filters *filter.Filters) {
-	filters.Register(filter.DiscardCloudServiceFilterName, func() (filter.Runner, error) {
-		return NewFilter(), nil
+	filters.Register(filter.DiscardCloudServiceFilterName, func() (filter.ObjectFilter, error) {
+		return &discardCloudServiceFilter{}, nil
 	})
 }
 
-func NewFilter() *discardCloudServiceFilter {
-	return &discardCloudServiceFilter{}
+type discardCloudServiceFilter struct{}
+
+func (sf *discardCloudServiceFilter) Name() string {
+	return filter.DiscardCloudServiceFilterName
 }
 
-type discardCloudServiceFilter struct {
-	serializerManager *serializer.SerializerManager
+func (sf *discardCloudServiceFilter) SupportedResourceAndVerbs() map[string]sets.String {
+	return map[string]sets.String{
+		"services": sets.NewString("list", "watch"),
+	}
 }
 
-func (sf *discardCloudServiceFilter) SetSerializerManager(s *serializer.SerializerManager) error {
-	sf.serializerManager = s
-	return nil
+func (sf *discardCloudServiceFilter) Filter(obj runtime.Object, _ <-chan struct{}) runtime.Object {
+	switch v := obj.(type) {
+	case *v1.ServiceList:
+		var svcNew []v1.Service
+		for i := range v.Items {
+			svc := discardCloudService(&v.Items[i])
+			if svc != nil {
+				svcNew = append(svcNew, *svc)
+			}
+		}
+		v.Items = svcNew
+		return v
+	case *v1.Service:
+		return discardCloudService(v)
+	default:
+		return v
+	}
 }
 
-func (sf *discardCloudServiceFilter) Filter(req *http.Request, rc io.ReadCloser, stopCh <-chan struct{}) (int, io.ReadCloser, error) {
-	s := filterutil.CreateSerializer(req, sf.serializerManager)
-	if s == nil {
-		klog.Errorf("skip filter, failed to create serializer in discardCloudServiceFilter")
-		return 0, rc, nil
+func discardCloudService(svc *v1.Service) *v1.Service {
+	nsName := fmt.Sprintf("%s/%s", svc.Namespace, svc.Name)
+	// remove cloud LoadBalancer service
+	if svc.Spec.Type == v1.ServiceTypeLoadBalancer {
+		if svc.Annotations[filter.SkipDiscardServiceAnnotation] != "true" {
+			klog.V(2).Infof("load balancer service(%s) is discarded in StreamResponseFilter of discardCloudServiceFilterHandler", nsName)
+			return nil
+		}
 	}
 
-	handler := NewDiscardCloudServiceFilterHandler(s)
-	return filter.NewFilterReadCloser(req, rc, handler, s, filter.DiscardCloudServiceFilterName, stopCh)
+	// remove cloud clusterIP service
+	if _, ok := cloudClusterIPService[nsName]; ok {
+		klog.V(2).Infof("clusterIP service(%s) is discarded in StreamResponseFilter of discardCloudServiceFilterHandler", nsName)
+		return nil
+	}
+
+	return svc
 }

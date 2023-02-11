@@ -23,35 +23,30 @@ package app
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/openyurtio/openyurt/pkg/controller/certificates"
-	lifecyclecontroller "github.com/openyurtio/openyurt/pkg/controller/nodelifecycle"
+	daemonpodupdater "github.com/openyurtio/openyurt/pkg/controller/daemonpodupdater"
+	poolcoordinatorcertmanager "github.com/openyurtio/openyurt/pkg/controller/poolcoordinator/cert"
+	poolcoordinator "github.com/openyurtio/openyurt/pkg/controller/poolcoordinator/delegatelease"
+	"github.com/openyurtio/openyurt/pkg/controller/poolcoordinator/podbinding"
+	"github.com/openyurtio/openyurt/pkg/controller/servicetopology"
 )
 
-func startNodeLifecycleController(ctx ControllerContext) (http.Handler, bool, error) {
-	lifecycleController, err := lifecyclecontroller.NewNodeLifecycleController(
-		ctx.InformerFactory.Coordination().V1().Leases(),
+func startPoolCoordinatorCertManager(ctx ControllerContext) (http.Handler, bool, error) {
+	poolcoordinatorCertManager := poolcoordinatorcertmanager.NewPoolCoordinatorCertManager(
+		ctx.ClientBuilder.ClientOrDie("poolcoordinator-cert-manager"),
 		ctx.InformerFactory.Core().V1().Pods(),
-		ctx.InformerFactory.Core().V1().Nodes(),
-		ctx.InformerFactory.Apps().V1().DaemonSets(),
-		// node lifecycle controller uses existing cluster role from node-controller
-		ctx.ClientBuilder.ClientOrDie("node-controller"),
-		//ctx.ComponentConfig.KubeCloudShared.NodeMonitorPeriod.Duration,
-		5*time.Second,
-		ctx.ComponentConfig.NodeLifecycleController.NodeStartupGracePeriod.Duration,
-		ctx.ComponentConfig.NodeLifecycleController.NodeMonitorGracePeriod.Duration,
-		ctx.ComponentConfig.NodeLifecycleController.PodEvictionTimeout.Duration,
-		ctx.ComponentConfig.NodeLifecycleController.NodeEvictionRate,
-		ctx.ComponentConfig.NodeLifecycleController.SecondaryNodeEvictionRate,
-		ctx.ComponentConfig.NodeLifecycleController.LargeClusterSizeThreshold,
-		ctx.ComponentConfig.NodeLifecycleController.UnhealthyZoneThreshold,
-		*ctx.ComponentConfig.NodeLifecycleController.EnableTaintManager,
 	)
-	if err != nil {
-		return nil, true, err
-	}
-	go lifecycleController.Run(ctx.Stop)
+	go poolcoordinatorCertManager.Run(1, ctx.Stop)
+	return nil, true, nil
+}
+
+func startPoolCoordinatorController(ctx ControllerContext) (http.Handler, bool, error) {
+	poolcoordinatorController := poolcoordinator.NewController(
+		ctx.ClientBuilder.ClientOrDie("poolcoordinator-delegate-lease"),
+		ctx.InformerFactory,
+	)
+	go poolcoordinatorController.Run(ctx.Stop)
 	return nil, true, nil
 }
 
@@ -63,5 +58,41 @@ func startYurtCSRApproverController(ctx ControllerContext) (http.Handler, bool, 
 	}
 	go csrApprover.Run(2, ctx.Stop)
 
+	return nil, true, nil
+}
+
+func startDaemonPodUpdaterController(ctx ControllerContext) (http.Handler, bool, error) {
+	daemonPodUpdaterCtrl := daemonpodupdater.NewController(
+		ctx.ClientBuilder.ClientOrDie("daemonPodUpdater-controller"),
+		ctx.InformerFactory.Apps().V1().DaemonSets(),
+		ctx.InformerFactory.Core().V1().Nodes(),
+		ctx.InformerFactory.Core().V1().Pods(),
+	)
+
+	go daemonPodUpdaterCtrl.Run(2, ctx.Stop)
+	return nil, true, nil
+}
+
+func startServiceTopologyController(ctx ControllerContext) (http.Handler, bool, error) {
+	clientSet := ctx.ClientBuilder.ClientOrDie("yurt-servicetopology-controller")
+
+	svcTopologyController, err := servicetopology.NewServiceTopologyController(
+		clientSet,
+		ctx.InformerFactory,
+		ctx.YurtInformerFactory,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	go svcTopologyController.Run(ctx.Stop)
+	return nil, true, nil
+}
+
+func startPodBindingController(ctx ControllerContext) (http.Handler, bool, error) {
+	podBindingController := podbinding.NewController(
+		ctx.ClientBuilder.ClientOrDie("poolcoordinator-pod-binding"),
+		ctx.InformerFactory,
+	)
+	go podBindingController.Run(ctx.Stop)
 	return nil, true, nil
 }

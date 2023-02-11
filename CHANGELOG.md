@@ -1,5 +1,274 @@
 # CHANGELOG
 
+## v1.2.0
+
+### What's New
+
+**Improve edge autonomy capability when cloud-edge network off**
+
+The original edge autonomy feature can make the pods on nodes un-evicted even if node crashed by adding annotation to node,
+and this feature is recommended to use for scenarios that pods should bind to node without recreation.
+After improving edge autonomy capability, when the reason of node NotReady is cloud-edge network off, pods will not be evicted
+because leader yurthub will help these offline nodes to proxy their heartbeats to the cloud via pool-coordinator component,
+and pods will be evicted and recreated on other ready node if node crashed.
+
+By the way, The original edge autonomy capability by annotating node (with node.beta.openyurt.io/autonomy) will be kept as it is,
+which will influence all pods on autonomy nodes. And a new annotation (named apps.openyurt.io/binding) can be added to workload to
+enable the original edge autonomy capability for specified pod.
+
+**Reduce the control-plane traffic between cloud and edge**
+
+Based on the Pool-Coordinator in the nodePool, A leader Yurthub will be elected in the nodePool. Leader Yurthub will
+list/watch pool-scope data(like endpoints/endpointslices) from cloud and write into pool-coordinator. then all components(like kube-proxy/coredns)
+in the nodePool will get pool-scope data from pool-coordinator instead of cloud kube-apiserver, so large volume control-plane traffic
+will be reduced.
+
+**Use raven component to replace yurt-tunnel component**
+
+Raven has released version v0.3, and provide cross-regional network communication ability based on PodIP or NodeIP, but yurt-tunnel
+can only provide cloud-edge requests forwarding for kubectl logs/exec commands. because raven provides much more than the capabilities
+provided by yurt-tunnel, and raven has been proven by a lot of work. so raven component is officially recommended to replace yurt-tunnel.
+
+### Other Notable changes
+
+- proposal of yurtadm join refactoring by @YTGhost in https://github.com/openyurtio/openyurt/pull/1048
+- [Proposal] edgex auto-collector proposal by @LavenderQAQ in https://github.com/openyurtio/openyurt/pull/1051
+- add timeout config in yurthub to handle those watch requests by @AndyEWang in https://github.com/openyurtio/openyurt/pull/1056
+- refactor yurtadm join by @YTGhost in https://github.com/openyurtio/openyurt/pull/1049
+- expose helm values for yurthub cacheagents by @huiwq1990 in https://github.com/openyurtio/openyurt/pull/1062
+- refactor yurthub cache to adapt different storages by @Congrool in https://github.com/openyurtio/openyurt/pull/882
+- add proposal of static pod upgrade model by @xavier-hou in https://github.com/openyurtio/openyurt/pull/1065
+- refactor yurtadm reset by @YTGhost in https://github.com/openyurtio/openyurt/pull/1075
+- bugfix: update the dependency yurt-app-manager-api from v0.18.8 to v0.6.0 by @YTGhost in https://github.com/openyurtio/openyurt/pull/1115
+- Feature: yurtadm reset/join modification. Do not remove k8s binaries, add flag for using local cni binaries. by @Windrow14 in https://github.com/openyurtio/openyurt/pull/1124
+- Improve certificate manager by @rambohe-ch in https://github.com/openyurtio/openyurt/pull/1133
+- fix: update package dependencies by @fengshunli in https://github.com/openyurtio/openyurt/pull/1149
+- fix: add common builder by @fengshunli in https://github.com/openyurtio/openyurt/pull/1152
+- generate yurtadm docs by @huiwq1990 in https://github.com/openyurtio/openyurt/pull/1159
+- add inclusterconfig filter for commenting kube-proxy configmap by @rambohe-ch in https://github.com/openyurtio/openyurt/pull/1158
+- delete yurt tunnel helm charts by @River-sh in https://github.com/openyurtio/openyurt/pull/1161
+
+### Fixes
+
+- bugfix: StreamResponseFilter of data filter framework can't work if size of one object is over 32KB by @rambohe-ch in https://github.com/openyurtio/openyurt/pull/1066
+- bugfix: add ignore preflight errors to adapt kubeadm before version 1.23.0 by @YTGhost in https://github.com/openyurtio/openyurt/pull/1092
+- bugfix: dynamically switch apiVersion of JoinConfiguration to adapt to different versions of k8s by @YTGhost in https://github.com/openyurtio/openyurt/pull/1112
+- bugfix: yurthub can not exit when SIGINT/SIGTERM happened by @rambohe-ch in https://github.com/openyurtio/openyurt/pull/1143
+
+### Contributors
+
+**Thank you to everyone who contributed to this release!** ❤
+
+- [@YTGhost](https://github.com/YTGhost)
+- [@Congrool](https://github.com/Congrool)
+- [@LavenderQAQ](https://github.com/LavenderQAQ)
+- [@AndyEWang](https://github.com/AndyEWang)
+- [@huiwq1990](https://github.com/huiwq1990)
+- [@rudolf-chy](https://github.com/rudolf-chy)
+- [@xavier-hou](https://github.com/xavier-hou)
+- [@gbtyy](https://github.com/gbtyy)
+- [@huweihuang](https://github.com/huweihuang)
+- [@zzguang](https://github.com/zzguang)
+- [@Windrow14](https://github.com/Windrow14)
+- [@fengshunli](https://github.com/fengshunli)
+- [@gnunu](https://github.com/gnunu)
+- [@luc99hen](https://github.com/luc99hen)
+- [@donychen1134](https://github.com/donychen1134)
+- [@LindaYu17](https://github.com/LindaYu17)
+- [@fujitatomoya](https://github.com/fujitatomoya)
+- [@River-sh](https://github.com/River-sh)
+- [@rambohe-ch](https://github.com/rambohe-ch)
+
+And thank you very much to everyone else not listed here who contributed in other ways like filing issues,
+giving feedback, helping users in community group, etc.
+
+## v1.1.0
+
+### What's New
+
+**Support OTA/Auto upgrade model for DaemonSet workload**
+
+Extend native DaemonSet `OnDelete` upgrade model by providing OTA and Auto two upgrade models.
+- OTA: workload owner can control the upgrade of workload through the exposed REST API on edge nodes.
+- Auto: Solve the DaemonSet upgrade process blocking problem which caused by node NotReady when the cloud-edge is disconnected.
+
+**Support autonomy feature validation in e2e tests**
+
+In order to test autonomy feature, network interface of control-plane is disconnected for simulating cloud-edge network
+disconnected, and then stop components(like kube-proxy, flannel, coredns, etc.) and check the recovery of these components.
+
+**Improve the Yurthub configuration for enabling the data filter function**
+
+Compares to the previous three configuration items, which include the component name, resource, and
+request verb. after improvement, only component name is need to configure for enabling data filter function. the original
+configuration format is also supported in order to keep consistency.
+
+### Other Notable changes
+
+- cache agent change optimize by @huiwq1990 in https://github.com/openyurtio/openyurt/pull/1008
+- Check if error via ListKeys of Storage Interface. by @fujitatomoya in https://github.com/openyurtio/openyurt/pull/1015
+- Add released openyurt versions to projectInfo when building binaries by @Congrool in https://github.com/openyurtio/openyurt/pull/1016
+- add auto pod upgrade controller for daemoset by @xavier-hou in https://github.com/openyurtio/openyurt/pull/970
+- add ota update RESTful API by @xavier-hou in https://github.com/openyurtio/openyurt/pull/1004
+- make servicetopology filter in yurthub work properly when service or nodepool change by @LinFCai in https://github.com/openyurtio/openyurt/pull/1019
+- improve data filter framework by @rambohe-ch in https://github.com/openyurtio/openyurt/pull/1025
+- add proposal to unify cloud edge comms solution by @zzguang in https://github.com/openyurtio/openyurt/pull/1027
+- improve health checker for adapting coordinator by @rambohe-ch in https://github.com/openyurtio/openyurt/pull/1032
+- Edge-autonomy-e2e-test implementation by @lorrielau in https://github.com/openyurtio/openyurt/pull/1022
+- improve e2e tests for supporting mac env and coredns autonomy by @rambohe-ch in https://github.com/openyurtio/openyurt/pull/1045
+- proposal of yurthub cache refactoring by @Congrool in https://github.com/openyurtio/openyurt/pull/897
+
+### Fixes
+
+- even no endpoints left after filter, an empty object should be returned to clients by @rambohe-ch in https://github.com/openyurtio/openyurt/pull/1028
+- non resource handle miss for coredns by @rambohe-ch in https://github.com/openyurtio/openyurt/pull/1044
+
+### Contributors
+
+**Thank you to everyone who contributed to this release!** ❤
+
+- [@windydayc](https://github.com/windydayc)
+- [@luc99hen](https://github.com/luc99hen)
+- [@Congrool](https://github.com/Congrool)
+- [@huiwq1990](https://github.com/huiwq1990)
+- [@fujitatomoya](https://github.com/fujitatomoya)
+- [@LinFCai](https://github.com/LinFCai)
+- [@xavier-hou](https://github.com/xavier-hou)
+- [@lorrielau](https://github.com/lorrielau)
+- [@YTGhost](https://github.com/YTGhost)
+- [@zzguang](https://github.com/zzguang)
+- [@Lan-ce-lot](https://github.com/Lan-ce-lot)
+
+And thank you very much to everyone else not listed here who contributed in other ways like filing issues,
+giving feedback, helping users in community group, etc.
+
+## v1.0
+
+We're excited to announce the release of OpenYurt 1.0.0!🎉🎉🎉
+
+Thanks to all the new and existing contributors who helped make this release happen!
+
+If you're new to OpenYurt, feel free to browse [OpenYurt website](https://openyurt.io), then start with [OpenYurt Installation](https://openyurt.io/docs/installation/summary/) and learn about [its core concepts](https://openyurt.io/docs/core-concepts/architecture).
+
+### Acknowledgements ❤️
+
+Nearly 20 people have contributed to this release and 8 of them are new contributors, Thanks to everyone!
+
+@huiwq1990 @Congrool @zhangzhenyuyu @rambohe-ch @gnunu @LinFCai @guoguodan @ankyit @luckymrwang @zzguang @hxcGit @Sodawyx
+@luc99hen @River-sh @slm940208 @windydayc @lorrielau @fujitatomoya @donychen1134
+
+### What's New
+
+#### API version
+
+The version of `NodePool` API has been upgraded to `v1beta1`, more details in the https://github.com/openyurtio/yurt-app-manager/pull/104
+
+Meanwhile, all APIs management in OpenYurt will be migrated to [openyurtio/api](https://github.com/openyurtio/api) repo, and we recommend you
+to import this package to use APIs of OpenYurt.
+
+#### Code Quality
+
+We track unit test coverage with [CodeCov](about.codecov.io)
+Code coverage for some repos as following:
+- openyurtio/openyurt: 47%
+- openyurtio/yurt-app-manager: 37%
+- openyurtio/raven: 53%
+
+and more details of unit tests coverage can be found in https://codecov.io/gh/openyurtio
+
+In addition to unit tests, other levels of testing are also added.
+- upgrade e2e test for openyurt by @lorrielau in https://github.com/openyurtio/openyurt/pull/945
+- add fuzz test for openyurtio/yurt-app-manager by @huiwq1990 in https://github.com/openyurtio/yurt-app-manager/pull/67
+- e2e test for openyurtio/yurt-app-manager by @huiwq1990 in https://github.com/openyurtio/yurt-app-manager/pull/107
+
+#### Performance Test
+
+OpenYurt makes Kubernetes work in cloud-edge collaborative environment with a non-intrusive design. so performance of
+some OpenYurt components have been considered carefully. several test reports have been submitted so that end users can clearly
+see the working status of OpenYurt components.
+- yurthub performance test report by @luc99hen in https://openyurt.io/docs/test-report/yurthub-performance-test
+- pods recovery efficiency test report by @Sodawyx in https://openyurt.io/docs/test-report/pod-recover-efficiency-test
+
+#### Installation Upgrade
+
+early installation way(convert K8s to OpenYurt) is removed. OpenYurt Cluster installation is divided into two parts:
+- [Install OpenYurt Control Plane Components](https://openyurt.io/docs/installation/summary#part-1-install-control-plane-components)
+- [Join Nodes](https://openyurt.io/docs/installation/yurtadm-join)
+
+and all Control Plane Components of OpenYurt are managed by helm charts in repo: https://github.com/openyurtio/openyurt-helm
+
+### Other Notable changes
+
+- upgrade kubeadm to 1.22 by @huiwq1990 in https://github.com/openyurtio/openyurt/pull/864
+- [Proposal] Proposal to install openyurt components using helm by @zhangzhenyuyu in https://github.com/openyurtio/openyurt/pull/849
+- support yurtadm token subcommand by @huiwq1990 in https://github.com/openyurtio/openyurt/pull/875
+- bugfix: only set signer name when not nil in order to prevent panic. by @rambohe-ch in https://github.com/openyurtio/openyurt/pull/877
+- [proposal] add proposal of multiplexing cloud-edge traffic by @rambohe-ch in https://github.com/openyurtio/openyurt/pull/804
+- yurthub return fake token when edge node disconnected with K8s APIServer by @LinFCai in https://github.com/openyurtio/openyurt/pull/868
+- deprecate cert-mgr-mode option of yurthub by @Congrool in https://github.com/openyurtio/openyurt/pull/901
+- [Proposal] add proposal of daemosnet update model by @hxcGit in https://github.com/openyurtio/openyurt/pull/921
+- fix: cache the server version info of kubernetes by @Sodawyx in https://github.com/openyurtio/openyurt/pull/936
+- add yurt-tunnel-dns yaml by @rambohe-ch in https://github.com/openyurtio/openyurt/pull/956
+- Separate YurtHubHost  & YurtHubProxyHost by @luc99hen in https://github.com/openyurtio/openyurt/pull/959
+- merge endpoints filter into service topology filter by @rambohe-ch in https://github.com/openyurtio/openyurt/pull/963
+- support yurtadm join to join multiple master nodes by @windydayc in https://github.com/openyurtio/openyurt/pull/964
+- feature: add lantency metrics for yurthub by @luc99hen in https://github.com/openyurtio/openyurt/pull/965
+- bump ginkgo to v2 by @lorrielau in https://github.com/openyurtio/openyurt/pull/945
+- beta.kubernetes.io is deprecated, use kubernetes.io instead by @fujitatomoya in https://github.com/openyurtio/openyurt/pull/969
+
+**Full Changelog**: https://github.com/openyurtio/openyurt/compare/v0.7.0...v1.0.0-rc1
+
+Thanks again to all the contributors!
+
+---
+## v0.7.0
+
+### What's New
+
+**Raven: enable edge-edge and edge-cloud communication in a non-intrusive way**
+
+Raven is component of the OpenYurt to enhance cluster networking capabilities. This enhancement is focused on edge-edge and edge-cloud communication in OpenYurt. It will provide layer 3 network connectivity among pods in different physical regions, as there are in one vanilla Kubernetes cluster.
+More information can be found at: (([#637](https://github.com/openyurtio/openyurt/pull/637), [Raven](https://openyurt.io/docs/next/core-concepts/raven/), [@DrmagicE](https://github.com/DrmagicE), [@BSWANG](https://github.com/BSWANG), [@njucjc](https://github.com/njucjc))
+
+**Support Kubernetes V1.22**
+
+Enable OpenYurt can work on the Kubernetes v1.22, includes adapting API change(such as v1beta1.CSR deprecation), adapt StreamingProxyRedirects feature and handle v1.EndpointSlice in service topology and so on. More information can be
+found at: ([#809](https://github.com/openyurtio/openyurt/pull/809), [#834](https://github.com/openyurtio/openyurt/pull/834), [@rambohe-ch](https://github.com/rambohe-ch), [@JameKeal](https://github.com/JameKeal), [@huiwq1990](https://github.com/huiwq1990))
+
+**Support EdgeX Foundry V2.1**
+
+Support EdgeX Foundry Jakarta version, and EdgeX Jakarta is the first LTS version and be widely considered as a production ready version. More information can be
+found at: ([#4](https://github.com/openyurtio/yurt-edgex-manager/pull/4), [#30](https://github.com/openyurtio/yurt-device-controller/pull/30), [@lwmqwer](https://github.com/lwmqwer), [@wawlian](https://github.com/wawlian), [@qclc](https://github.com/qclc))
+
+**Support IPv6 network in OpenYurt**
+
+Support OpenYurt can run on the IPv6 network environment. More information can be found at: ([#842](https://github.com/openyurtio/openyurt/pull/842), [@tydra-wang](https://github.com/tydra-wang))
+
+### Other Notable Changes
+
+- add nodepool governance capability proposal ([#772](https://github.com/openyurtio/openyurt/pull/772), [@Peeknut](https://github.com/Peeknut))
+- add proposal of multiplexing cloud-edge traffic ([#804](https://github.com/openyurtio/openyurt/pull/804), [@rambohe-ch](https://github.com/rambohe-ch))
+- provide flannel image and cni binary for edge network ([#80](https://github.com/openyurtio/openyurt.io/pull/80), [@yingjianjian](https://github.com/yingjianjian))
+- Remove convert and revert command from yurtctl ([#826](https://github.com/openyurtio/openyurt/pull/826), [@lonelyCZ](https://github.com/lonelyCZ))
+- add tenant isolation for components such as kube-proxy&flannel which run in ns kube-system ([#787](https://github.com/openyurtio/openyurt/pull/787), [@YRXING](https://github.com/YRXING))
+- Rename yurtctl init/join/reset to yurtadm init/join/reset ([#819](https://github.com/openyurtio/openyurt/pull/819), [@lonelyCZ](https://github.com/lonelyCZ))
+- Use configmap to configure the data source of filter framework ([#749](https://github.com/openyurtio/openyurt/pull/749), [#790](https://github.com/openyurtio/openyurt/pull/790), [@yingjianjian](https://github.com/yingjianjian), [@rambohe-ch](https://github.com/rambohe-ch))
+- add yurtctl test init cmd to setup OpenYurt cluster with kind ([#783](https://github.com/openyurtio/openyurt/pull/783), [@Congrool](https://github.com/Congrool))
+- support local up openyurt on mac machine ([#836](https://github.com/openyurtio/openyurt/pull/836), [@rambohe-ch](https://github.com/rambohe-ch), [@Congrool](https://github.com/Congrool))
+- cleanup: io/ioutil([#813](https://github.com/openyurtio/openyurt/pull/813), [@cndoit18](https://github.com/cndoit18))
+- use verb %w with fmt.Errorf() when generate new wrapped error ([#832](https://github.com/openyurtio/openyurt/pull/832), [@zhaodiaoer](https://github.com/zhaodiaoer))
+- decouple yurtctl with yurtadm ([#848](https://github.com/openyurtio/openyurt/pull/848), [@Congrool](https://github.com/Congrool))
+- add enable-node-pool parameter for yurthub in order to disable nodepools list/watch in filters when testing ([#822](https://github.com/openyurtio/openyurt/pull/822), [@rambohe-ch](https://github.com/rambohe-ch))
+- ingress: update edge ingress proposal to add enhancements ([#816](https://github.com/openyurtio/openyurt/pull/816), [@zzguang](https://github.com/zzguang))
+- add configmap delete handler for approver ([#793](https://github.com/openyurtio/openyurt/pull/793), [@huiwq1990](https://github.com/huiwq1990))
+- fix: a typo in yurtctl util.go which uses 'lable' as 'label' ([#784](https://github.com/openyurtio/openyurt/pull/784), [@donychen1134](https://github.com/donychen1134))
+
+### Bug Fixes
+
+- ungzip response by yurthub when response header contains content-encoding=gzip ([#794](https://github.com/openyurtio/openyurt/pull/794), [@rambohe-ch](https://github.com/rambohe-ch))
+- fix mistaken selflink in yurthub ([#785](https://github.com/openyurtio/openyurt/pull/785), [@Congrool](https://github.com/Congrool))
+
+---
 ## v0.6.0
 
 ### What's New

@@ -17,11 +17,40 @@ limitations under the License.
 package remote
 
 import (
+	"context"
+	"net/http"
 	"net/url"
 	"testing"
 
 	"github.com/openyurtio/openyurt/pkg/yurthub/healthchecker"
+	"github.com/openyurtio/openyurt/pkg/yurthub/proxy/util"
+	"github.com/openyurtio/openyurt/pkg/yurthub/transport"
 )
+
+var neverStop <-chan struct{} = context.Background().Done()
+
+type nopRoundTrip struct{}
+
+func (n *nopRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) {
+	return &http.Response{
+		Status:     http.StatusText(http.StatusOK),
+		StatusCode: http.StatusOK,
+	}, nil
+}
+
+type fakeTransportManager struct{}
+
+func (f *fakeTransportManager) CurrentTransport() http.RoundTripper {
+	return &nopRoundTrip{}
+}
+
+func (f *fakeTransportManager) BearerTransport() http.RoundTripper {
+	return &nopRoundTrip{}
+}
+
+func (f *fakeTransportManager) Close(_ string) {}
+
+var transportMgr transport.Interface = &fakeTransportManager{}
 
 type PickBackend struct {
 	DeltaRequestsCnt int
@@ -66,34 +95,36 @@ func TestRrLoadBalancerAlgo(t *testing.T) {
 
 	checker := healthchecker.NewFakeChecker(true, map[string]int{})
 	for k, tc := range testcases {
-		backends := make([]*RemoteProxy, len(tc.Servers))
+		backends := make([]*util.RemoteProxy, len(tc.Servers))
 		for i := range tc.Servers {
+			var err error
 			u, _ := url.Parse(tc.Servers[i])
-			backends[i] = &RemoteProxy{
-				remoteServer: u,
-				checker:      checker,
+			backends[i], err = util.NewRemoteProxy(u, nil, nil, transportMgr, neverStop)
+			if err != nil {
+				t.Errorf("failed to create remote server for %s, %v", u.String(), err)
 			}
 		}
 
 		rr := &rrLoadBalancerAlgo{
 			backends: backends,
+			checker:  checker,
 		}
 
 		for i := range tc.PickBackends {
-			var b *RemoteProxy
+			var b *util.RemoteProxy
 			for j := 0; j < tc.PickBackends[i].DeltaRequestsCnt; j++ {
 				b = rr.PickOne()
 			}
 
 			if len(tc.PickBackends[i].ReturnServer) == 0 {
 				if b != nil {
-					t.Errorf("%s rr lb pick: expect no backend server, but got %s", k, b.remoteServer.String())
+					t.Errorf("%s rr lb pick: expect no backend server, but got %s", k, b.RemoteServer().String())
 				}
 			} else {
 				if b == nil {
 					t.Errorf("%s rr lb pick: expect backend server: %s, but got no backend server", k, tc.PickBackends[i].ReturnServer)
-				} else if b.remoteServer.String() != tc.PickBackends[i].ReturnServer {
-					t.Errorf("%s rr lb pick(round %d): expect backend server: %s, but got %s", k, i+1, tc.PickBackends[i].ReturnServer, b.remoteServer.String())
+				} else if b.RemoteServer().String() != tc.PickBackends[i].ReturnServer {
+					t.Errorf("%s rr lb pick(round %d): expect backend server: %s, but got %s", k, i+1, tc.PickBackends[i].ReturnServer, b.RemoteServer().String())
 				}
 			}
 		}
@@ -127,34 +158,36 @@ func TestRrLoadBalancerAlgoWithReverseHealthy(t *testing.T) {
 		"http://127.0.0.1:8081": 2,
 	})
 	for k, tc := range testcases {
-		backends := make([]*RemoteProxy, len(tc.Servers))
+		backends := make([]*util.RemoteProxy, len(tc.Servers))
 		for i := range tc.Servers {
+			var err error
 			u, _ := url.Parse(tc.Servers[i])
-			backends[i] = &RemoteProxy{
-				remoteServer: u,
-				checker:      checker,
+			backends[i], err = util.NewRemoteProxy(u, nil, nil, transportMgr, neverStop)
+			if err != nil {
+				t.Errorf("failed to create remote server for %s, %v", u.String(), err)
 			}
 		}
 
 		rr := &rrLoadBalancerAlgo{
 			backends: backends,
+			checker:  checker,
 		}
 
 		for i := range tc.PickBackends {
-			var b *RemoteProxy
+			var b *util.RemoteProxy
 			for j := 0; j < tc.PickBackends[i].DeltaRequestsCnt; j++ {
 				b = rr.PickOne()
 			}
 
 			if len(tc.PickBackends[i].ReturnServer) == 0 {
 				if b != nil {
-					t.Errorf("%s rr lb pick: expect no backend server, but got %s", k, b.remoteServer.String())
+					t.Errorf("%s rr lb pick: expect no backend server, but got %s", k, b.RemoteServer().String())
 				}
 			} else {
 				if b == nil {
 					t.Errorf("%s rr lb pick(round %d): expect backend server: %s, but got no backend server", k, i+1, tc.PickBackends[i].ReturnServer)
-				} else if b.remoteServer.String() != tc.PickBackends[i].ReturnServer {
-					t.Errorf("%s rr lb pick(round %d): expect backend server: %s, but got %s", k, i+1, tc.PickBackends[i].ReturnServer, b.remoteServer.String())
+				} else if b.RemoteServer().String() != tc.PickBackends[i].ReturnServer {
+					t.Errorf("%s rr lb pick(round %d): expect backend server: %s, but got %s", k, i+1, tc.PickBackends[i].ReturnServer, b.RemoteServer().String())
 				}
 			}
 		}
@@ -199,34 +232,36 @@ func TestPriorityLoadBalancerAlgo(t *testing.T) {
 
 	checker := healthchecker.NewFakeChecker(true, map[string]int{})
 	for k, tc := range testcases {
-		backends := make([]*RemoteProxy, len(tc.Servers))
+		backends := make([]*util.RemoteProxy, len(tc.Servers))
 		for i := range tc.Servers {
+			var err error
 			u, _ := url.Parse(tc.Servers[i])
-			backends[i] = &RemoteProxy{
-				remoteServer: u,
-				checker:      checker,
+			backends[i], err = util.NewRemoteProxy(u, nil, nil, transportMgr, neverStop)
+			if err != nil {
+				t.Errorf("failed to create remote server for %s, %v", u.String(), err)
 			}
 		}
 
 		rr := &priorityLoadBalancerAlgo{
 			backends: backends,
+			checker:  checker,
 		}
 
 		for i := range tc.PickBackends {
-			var b *RemoteProxy
+			var b *util.RemoteProxy
 			for j := 0; j < tc.PickBackends[i].DeltaRequestsCnt; j++ {
 				b = rr.PickOne()
 			}
 
 			if len(tc.PickBackends[i].ReturnServer) == 0 {
 				if b != nil {
-					t.Errorf("%s priority lb pick: expect no backend server, but got %s", k, b.remoteServer.String())
+					t.Errorf("%s priority lb pick: expect no backend server, but got %s", k, b.RemoteServer().String())
 				}
 			} else {
 				if b == nil {
 					t.Errorf("%s priority lb pick: expect backend server: %s, but got no backend server", k, tc.PickBackends[i].ReturnServer)
-				} else if b.remoteServer.String() != tc.PickBackends[i].ReturnServer {
-					t.Errorf("%s priority lb pick(round %d): expect backend server: %s, but got %s", k, i+1, tc.PickBackends[i].ReturnServer, b.remoteServer.String())
+				} else if b.RemoteServer().String() != tc.PickBackends[i].ReturnServer {
+					t.Errorf("%s priority lb pick(round %d): expect backend server: %s, but got %s", k, i+1, tc.PickBackends[i].ReturnServer, b.RemoteServer().String())
 				}
 			}
 		}
@@ -258,34 +293,36 @@ func TestPriorityLoadBalancerAlgoWithReverseHealthy(t *testing.T) {
 		"http://127.0.0.1:8080": 2,
 		"http://127.0.0.1:8081": 3})
 	for k, tc := range testcases {
-		backends := make([]*RemoteProxy, len(tc.Servers))
+		backends := make([]*util.RemoteProxy, len(tc.Servers))
 		for i := range tc.Servers {
+			var err error
 			u, _ := url.Parse(tc.Servers[i])
-			backends[i] = &RemoteProxy{
-				remoteServer: u,
-				checker:      checker,
+			backends[i], err = util.NewRemoteProxy(u, nil, nil, transportMgr, neverStop)
+			if err != nil {
+				t.Errorf("failed to create remote server for %s, %v", u.String(), err)
 			}
 		}
 
 		rr := &priorityLoadBalancerAlgo{
 			backends: backends,
+			checker:  checker,
 		}
 
 		for i := range tc.PickBackends {
-			var b *RemoteProxy
+			var b *util.RemoteProxy
 			for j := 0; j < tc.PickBackends[i].DeltaRequestsCnt; j++ {
 				b = rr.PickOne()
 			}
 
 			if len(tc.PickBackends[i].ReturnServer) == 0 {
 				if b != nil {
-					t.Errorf("%s priority lb pick: expect no backend server, but got %s", k, b.remoteServer.String())
+					t.Errorf("%s priority lb pick: expect no backend server, but got %s", k, b.RemoteServer().String())
 				}
 			} else {
 				if b == nil {
 					t.Errorf("%s priority lb pick: expect backend server: %s, but got no backend server", k, tc.PickBackends[i].ReturnServer)
-				} else if b.remoteServer.String() != tc.PickBackends[i].ReturnServer {
-					t.Errorf("%s priority lb pick(round %d): expect backend server: %s, but got %s", k, i+1, tc.PickBackends[i].ReturnServer, b.remoteServer.String())
+				} else if b.RemoteServer().String() != tc.PickBackends[i].ReturnServer {
+					t.Errorf("%s priority lb pick(round %d): expect backend server: %s, but got %s", k, i+1, tc.PickBackends[i].ReturnServer, b.RemoteServer().String())
 				}
 			}
 		}

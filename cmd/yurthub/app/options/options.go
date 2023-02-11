@@ -23,6 +23,12 @@ import (
 	"time"
 
 	"github.com/spf13/pflag"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	componentbaseconfig "k8s.io/component-base/config"
+	"k8s.io/klog/v2"
+	utilnet "k8s.io/utils/net"
 
 	"github.com/openyurtio/openyurt/pkg/projectinfo"
 	"github.com/openyurtio/openyurt/pkg/yurthub/storage/disk"
@@ -30,28 +36,29 @@ import (
 )
 
 const (
-	DummyIfCIDR   = "169.254.0.0/16"
-	ExclusiveCIDR = "169.254.31.0/24"
+	DefaultDummyIfIP4 = "169.254.2.1"
+	DefaultDummyIfIP6 = "fd00::2:1"
+	DummyIfCIDR4      = "169.254.0.0/16"
+	ExclusiveCIDR     = "169.254.31.0/24"
 )
 
 // YurtHubOptions is the main settings for the yurthub
 type YurtHubOptions struct {
 	ServerAddr                string
-	YurtHubHost               string
-	YurtHubPort               string
-	YurtHubProxyPort          string
-	YurtHubProxySecurePort    string
+	YurtHubHost               string // YurtHub server host (e.g.: expose metrics API)
+	YurtHubProxyHost          string // YurtHub proxy server host
+	YurtHubPort               int
+	YurtHubProxyPort          int
+	YurtHubProxySecurePort    int
 	GCFrequency               int
-	CertMgrMode               string
-	YurtHubCertOrganizations  string
-	KubeletRootCAFilePath     string
-	KubeletPairFilePath       string
+	YurtHubCertOrganizations  []string
 	NodeName                  string
 	NodePoolName              string
 	LBMode                    string
 	HeartbeatFailedRetry      int
 	HeartbeatHealthyThreshold int
 	HeartbeatTimeoutSeconds   int
+	HeartbeatIntervalSeconds  int
 	MaxRequestInFlight        int
 	JoinToken                 string
 	RootDir                   string
@@ -68,29 +75,37 @@ type YurtHubOptions struct {
 	WorkingMode               string
 	KubeletHealthGracePeriod  time.Duration
 	EnableNodePool            bool
+	MinRequestTimeout         time.Duration
+	CACertHashes              []string
+	UnsafeSkipCAVerification  bool
+	ClientForTest             kubernetes.Interface
+	EnableCoordinator         bool
+	CoordinatorServerAddr     string
+	CoordinatorStoragePrefix  string
+	CoordinatorStorageAddr    string
+	LeaderElection            componentbaseconfig.LeaderElectionConfiguration
 }
 
 // NewYurtHubOptions creates a new YurtHubOptions with a default config.
 func NewYurtHubOptions() *YurtHubOptions {
 	o := &YurtHubOptions{
 		YurtHubHost:               "127.0.0.1",
+		YurtHubProxyHost:          "127.0.0.1",
 		YurtHubProxyPort:          util.YurtHubProxyPort,
 		YurtHubPort:               util.YurtHubPort,
 		YurtHubProxySecurePort:    util.YurtHubProxySecurePort,
 		GCFrequency:               120,
-		CertMgrMode:               util.YurtHubCertificateManagerName,
-		KubeletRootCAFilePath:     util.DefaultKubeletRootCAFilePath,
-		KubeletPairFilePath:       util.DefaultKubeletPairFilePath,
+		YurtHubCertOrganizations:  make([]string, 0),
 		LBMode:                    "rr",
 		HeartbeatFailedRetry:      3,
 		HeartbeatHealthyThreshold: 2,
 		HeartbeatTimeoutSeconds:   2,
+		HeartbeatIntervalSeconds:  10,
 		MaxRequestInFlight:        250,
 		RootDir:                   filepath.Join("/var/lib/", projectinfo.GetHubName()),
 		EnableProfiling:           true,
 		EnableDummyIf:             true,
 		EnableIptables:            true,
-		HubAgentDummyIfIP:         "169.254.2.1",
 		HubAgentDummyIfName:       fmt.Sprintf("%s-dummy0", projectinfo.GetHubName()),
 		DiskCachePath:             disk.CacheBaseDir,
 		AccessServerThroughHub:    true,
@@ -99,12 +114,27 @@ func NewYurtHubOptions() *YurtHubOptions {
 		WorkingMode:               string(util.WorkingModeEdge),
 		KubeletHealthGracePeriod:  time.Second * 40,
 		EnableNodePool:            true,
+		MinRequestTimeout:         time.Second * 1800,
+		CACertHashes:              make([]string, 0),
+		UnsafeSkipCAVerification:  true,
+		CoordinatorServerAddr:     fmt.Sprintf("https://%s:%s", util.DefaultPoolCoordinatorAPIServerSvcName, util.DefaultPoolCoordinatorAPIServerSvcPort),
+		CoordinatorStorageAddr:    fmt.Sprintf("https://%s:%s", util.DefaultPoolCoordinatorEtcdSvcName, util.DefaultPoolCoordinatorEtcdSvcPort),
+		CoordinatorStoragePrefix:  "/registry",
+		LeaderElection: componentbaseconfig.LeaderElectionConfiguration{
+			LeaderElect:       true,
+			LeaseDuration:     metav1.Duration{Duration: 15 * time.Second},
+			RenewDeadline:     metav1.Duration{Duration: 10 * time.Second},
+			RetryPeriod:       metav1.Duration{Duration: 2 * time.Second},
+			ResourceLock:      resourcelock.LeasesResourceLock,
+			ResourceName:      projectinfo.GetHubName(),
+			ResourceNamespace: "kube-system",
+		},
 	}
 	return o
 }
 
-// ValidateOptions validates YurtHubOptions
-func ValidateOptions(options *YurtHubOptions) error {
+// Validate validates YurtHubOptions
+func (options *YurtHubOptions) Validate() error {
 	if len(options.NodeName) == 0 {
 		return fmt.Errorf("node name is empty")
 	}
@@ -113,20 +143,24 @@ func ValidateOptions(options *YurtHubOptions) error {
 		return fmt.Errorf("server-address is empty")
 	}
 
-	if !util.IsSupportedLBMode(options.LBMode) {
-		return fmt.Errorf("lb mode(%s) is not supported", options.LBMode)
+	if len(options.JoinToken) == 0 {
+		return fmt.Errorf("bootstrap token is empty")
 	}
 
-	if !util.IsSupportedCertMode(options.CertMgrMode) {
-		return fmt.Errorf("cert manage mode %s is not supported", options.CertMgrMode)
+	if !util.IsSupportedLBMode(options.LBMode) {
+		return fmt.Errorf("lb mode(%s) is not supported", options.LBMode)
 	}
 
 	if !util.IsSupportedWorkingMode(util.WorkingMode(options.WorkingMode)) {
 		return fmt.Errorf("working mode %s is not supported", options.WorkingMode)
 	}
 
-	if err := verifyDummyIP(options.HubAgentDummyIfIP); err != nil {
+	if err := options.verifyDummyIP(); err != nil {
 		return fmt.Errorf("dummy ip %s is not invalid, %w", options.HubAgentDummyIfIP, err)
+	}
+
+	if len(options.CACertHashes) == 0 && !options.UnsafeSkipCAVerification {
+		return fmt.Errorf("set --discovery-token-unsafe-skip-ca-verification flag as true or pass CACertHashes to continue")
 	}
 
 	return nil
@@ -134,21 +168,20 @@ func ValidateOptions(options *YurtHubOptions) error {
 
 // AddFlags returns flags for a specific yurthub by section name
 func (o *YurtHubOptions) AddFlags(fs *pflag.FlagSet) {
-	fs.StringVar(&o.YurtHubHost, "bind-address", o.YurtHubHost, "the IP address on which to listen for the --serve-port port.")
-	fs.StringVar(&o.YurtHubPort, "serve-port", o.YurtHubPort, "the port on which to serve HTTP requests(like profiling, metrics) for hub agent.")
-	fs.StringVar(&o.YurtHubProxyPort, "proxy-port", o.YurtHubProxyPort, "the port on which to proxy HTTP requests to kube-apiserver")
-	fs.StringVar(&o.YurtHubProxySecurePort, "proxy-secure-port", o.YurtHubProxySecurePort, "the port on which to proxy HTTPS requests to kube-apiserver")
+	fs.StringVar(&o.YurtHubHost, "bind-address", o.YurtHubHost, "the IP address of YurtHub Server")
+	fs.IntVar(&o.YurtHubPort, "serve-port", o.YurtHubPort, "the port on which to serve HTTP requests(like profiling, metrics) for hub agent.")
+	fs.StringVar(&o.YurtHubProxyHost, "bind-proxy-address", o.YurtHubProxyHost, "the IP address of YurtHub Proxy Server")
+	fs.IntVar(&o.YurtHubProxyPort, "proxy-port", o.YurtHubProxyPort, "the port on which to proxy HTTP requests to kube-apiserver")
+	fs.IntVar(&o.YurtHubProxySecurePort, "proxy-secure-port", o.YurtHubProxySecurePort, "the port on which to proxy HTTPS requests to kube-apiserver")
 	fs.StringVar(&o.ServerAddr, "server-addr", o.ServerAddr, "the address of Kubernetes kube-apiserver,the format is: \"server1,server2,...\"")
-	fs.StringVar(&o.CertMgrMode, "cert-mgr-mode", o.CertMgrMode, "the cert manager mode, hubself: auto generate client cert for hub agent.")
-	fs.StringVar(&o.YurtHubCertOrganizations, "hub-cert-organizations", o.YurtHubCertOrganizations, "Organizations that will be added into hub's client certificate in hubself cert-mgr-mode, the format is: certOrg1,certOrg1,...")
-	fs.StringVar(&o.KubeletRootCAFilePath, "kubelet-ca-file", o.KubeletRootCAFilePath, "the ca file path used by kubelet.")
-	fs.StringVar(&o.KubeletPairFilePath, "kubelet-client-certificate", o.KubeletPairFilePath, "the path of kubelet client certificate file.")
+	fs.StringSliceVar(&o.YurtHubCertOrganizations, "hub-cert-organizations", o.YurtHubCertOrganizations, "Organizations that will be added into hub's apiserver client certificate, the format is: certOrg1,certOrg2,...")
 	fs.IntVar(&o.GCFrequency, "gc-frequency", o.GCFrequency, "the frequency to gc cache in storage(unit: minute).")
 	fs.StringVar(&o.NodeName, "node-name", o.NodeName, "the name of node that runs hub agent")
 	fs.StringVar(&o.LBMode, "lb-mode", o.LBMode, "the mode of load balancer to connect remote servers(rr, priority)")
 	fs.IntVar(&o.HeartbeatFailedRetry, "heartbeat-failed-retry", o.HeartbeatFailedRetry, "number of heartbeat request retry after having failed.")
 	fs.IntVar(&o.HeartbeatHealthyThreshold, "heartbeat-healthy-threshold", o.HeartbeatHealthyThreshold, "minimum consecutive successes for the heartbeat to be considered healthy after having failed.")
 	fs.IntVar(&o.HeartbeatTimeoutSeconds, "heartbeat-timeout-seconds", o.HeartbeatTimeoutSeconds, " number of seconds after which the heartbeat times out.")
+	fs.IntVar(&o.HeartbeatIntervalSeconds, "heartbeat-interval-seconds", o.HeartbeatIntervalSeconds, " number of seconds for omitting one time heartbeat to remote server.")
 	fs.IntVar(&o.MaxRequestInFlight, "max-requests-in-flight", o.MaxRequestInFlight, "the maximum number of parallel requests.")
 	fs.StringVar(&o.JoinToken, "join-token", o.JoinToken, "the Join token for bootstrapping hub agent when --cert-mgr-mode=hubself.")
 	fs.StringVar(&o.RootDir, "root-dir", o.RootDir, "directory path for managing hub agent files(pki, cache etc).")
@@ -166,23 +199,73 @@ func (o *YurtHubOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.WorkingMode, "working-mode", o.WorkingMode, "the working mode of yurthub(edge, cloud).")
 	fs.DurationVar(&o.KubeletHealthGracePeriod, "kubelet-health-grace-period", o.KubeletHealthGracePeriod, "the amount of time which we allow kubelet to be unresponsive before stop renew node lease")
 	fs.BoolVar(&o.EnableNodePool, "enable-node-pool", o.EnableNodePool, "enable list/watch nodepools resource or not for filters(only used for testing)")
+	fs.DurationVar(&o.MinRequestTimeout, "min-request-timeout", o.MinRequestTimeout, "An optional field indicating at least how long a proxy handler must keep a request open before timing it out. Currently only honored by the local watch request handler(use request parameter timeoutSeconds firstly), which picks a randomized value above this number as the connection timeout, to spread out load.")
+	fs.StringSliceVar(&o.CACertHashes, "discovery-token-ca-cert-hash", o.CACertHashes, "For token-based discovery, validate that the root CA public key matches this hash (format: \"<type>:<value>\").")
+	fs.BoolVar(&o.UnsafeSkipCAVerification, "discovery-token-unsafe-skip-ca-verification", o.UnsafeSkipCAVerification, "For token-based discovery, allow joining without --discovery-token-ca-cert-hash pinning.")
+	fs.BoolVar(&o.EnableCoordinator, "enable-coordinator", o.EnableCoordinator, "make yurthub aware of the pool coordinator")
+	fs.StringVar(&o.CoordinatorServerAddr, "coordinator-server-addr", o.CoordinatorServerAddr, "Coordinator APIServer address in format https://host:port")
+	fs.StringVar(&o.CoordinatorStoragePrefix, "coordinator-storage-prefix", o.CoordinatorStoragePrefix, "Pool-Coordinator etcd storage prefix, same as etcd-prefix of Kube-APIServer")
+	fs.StringVar(&o.CoordinatorStorageAddr, "coordinator-storage-addr", o.CoordinatorStorageAddr, "Address of Pool-Coordinator etcd, in the format host:port")
+	bindFlags(&o.LeaderElection, fs)
 }
 
-// verifyDummyIP verify the specified ip is valid or not
-func verifyDummyIP(dummyIP string) error {
-	//169.254.2.1/32
+// bindFlags binds the LeaderElectionConfiguration struct fields to a flagset
+func bindFlags(l *componentbaseconfig.LeaderElectionConfiguration, fs *pflag.FlagSet) {
+	fs.BoolVar(&l.LeaderElect, "leader-elect", l.LeaderElect, ""+
+		"Start a leader election client and gain leadership based on pool coordinator")
+	fs.DurationVar(&l.LeaseDuration.Duration, "leader-elect-lease-duration", l.LeaseDuration.Duration, ""+
+		"The duration that non-leader candidates will wait after observing a leadership "+
+		"renewal until attempting to acquire leadership of a led but unrenewed leader "+
+		"slot. This is effectively the maximum duration that a leader can be stopped "+
+		"before it is replaced by another candidate. This is only applicable if leader "+
+		"election is enabled.")
+	fs.DurationVar(&l.RenewDeadline.Duration, "leader-elect-renew-deadline", l.RenewDeadline.Duration, ""+
+		"The interval between attempts by the acting master to renew a leadership slot "+
+		"before it stops leading. This must be less than or equal to the lease duration. "+
+		"This is only applicable if leader election is enabled.")
+	fs.DurationVar(&l.RetryPeriod.Duration, "leader-elect-retry-period", l.RetryPeriod.Duration, ""+
+		"The duration the clients should wait between attempting acquisition and renewal "+
+		"of a leadership. This is only applicable if leader election is enabled.")
+	fs.StringVar(&l.ResourceLock, "leader-elect-resource-lock", l.ResourceLock, ""+
+		"The type of resource object that is used for locking during "+
+		"leader election. Supported options are `leases` (default), `endpoints` and `configmaps`.")
+	fs.StringVar(&l.ResourceName, "leader-elect-resource-name", l.ResourceName, ""+
+		"The name of resource object that is used for locking during "+
+		"leader election.")
+	fs.StringVar(&l.ResourceNamespace, "leader-elect-resource-namespace", l.ResourceNamespace, ""+
+		"The namespace of resource object that is used for locking during "+
+		"leader election.")
+}
+
+// verifyDummyIP verify the specified ip is valid or not and set the default ip if empty
+func (o *YurtHubOptions) verifyDummyIP() error {
+	if o.HubAgentDummyIfIP == "" {
+		if utilnet.IsIPv6String(o.YurtHubHost) {
+			o.HubAgentDummyIfIP = DefaultDummyIfIP6
+		} else {
+			o.HubAgentDummyIfIP = DefaultDummyIfIP4
+		}
+		klog.Infof("dummy ip not set, will use %s as default", o.HubAgentDummyIfIP)
+		return nil
+	}
+
+	dummyIP := o.HubAgentDummyIfIP
 	dip := net.ParseIP(dummyIP)
 	if dip == nil {
 		return fmt.Errorf("dummy ip %s is invalid", dummyIP)
 	}
 
-	_, dummyIfIPNet, err := net.ParseCIDR(DummyIfCIDR)
+	if utilnet.IsIPv6(dip) {
+		return nil
+	}
+
+	_, dummyIfIPNet, err := net.ParseCIDR(DummyIfCIDR4)
 	if err != nil {
-		return fmt.Errorf("cidr(%s) is invalid, %w", DummyIfCIDR, err)
+		return fmt.Errorf("cidr(%s) is invalid, %w", DummyIfCIDR4, err)
 	}
 
 	if !dummyIfIPNet.Contains(dip) {
-		return fmt.Errorf("dummy ip %s is not in cidr(%s)", dummyIP, DummyIfCIDR)
+		return fmt.Errorf("dummy ip %s is not in cidr(%s)", dummyIP, DummyIfCIDR4)
 	}
 
 	_, exclusiveIPNet, err := net.ParseCIDR(ExclusiveCIDR)

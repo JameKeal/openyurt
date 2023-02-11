@@ -22,9 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,15 +30,12 @@ import (
 	"k8s.io/apiserver/pkg/endpoints/handlers/negotiation"
 	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
-	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
-	certutil "k8s.io/client-go/util/cert"
 	"k8s.io/klog/v2"
 
 	"github.com/openyurtio/openyurt/pkg/projectinfo"
 	"github.com/openyurtio/openyurt/pkg/yurthub/kubernetes/serializer"
 	"github.com/openyurtio/openyurt/pkg/yurthub/metrics"
+	coordinatorconstants "github.com/openyurtio/openyurt/pkg/yurthub/poolcoordinator/constants"
 )
 
 // ProxyKeyType represents the key in proxy request context
@@ -54,15 +49,7 @@ const (
 	WorkingModeCloud WorkingMode = "cloud"
 	// WorkingModeEdge represents yurthub is working in edge mode, which means yurthub is deployed on the edge side.
 	WorkingModeEdge WorkingMode = "edge"
-)
 
-const (
-	// YurtHubCertificateManagerName represents the certificateManager name in yurthub mode
-	YurtHubCertificateManagerName = "hubself"
-	// DefaultKubeletPairFilePath represents the default kubelet pair file path
-	DefaultKubeletPairFilePath = "/var/lib/kubelet/pki/kubelet-client-current.pem"
-	// DefaultKubeletRootCAFilePath represents the default kubelet ca file path
-	DefaultKubeletRootCAFilePath = "/etc/kubernetes/pki/ca.crt"
 	// ProxyReqContentType represents request content type context key
 	ProxyReqContentType ProxyKeyType = iota
 	// ProxyRespContentType represents response content type context key
@@ -73,16 +60,28 @@ const (
 	ProxyReqCanCache
 	// ProxyListSelector represents label selector and filed selector string for list request
 	ProxyListSelector
-	YurtHubNamespace   = "kube-system"
-	CacheUserAgentsKey = "cache_agents"
+	// ProxyPoolScopedResource represents if this request is asking for pool-scoped resources
+	ProxyPoolScopedResource
+	// DefaultPoolCoordinatorEtcdSvcName represents default pool coordinator etcd service
+	DefaultPoolCoordinatorEtcdSvcName = "pool-coordinator-etcd"
+	// DefaultPoolCoordinatorAPIServerSvcName represents default pool coordinator apiServer service
+	DefaultPoolCoordinatorAPIServerSvcName = "pool-coordinator-apiserver"
+	// DefaultPoolCoordinatorEtcdSvcPort represents default pool coordinator etcd port
+	DefaultPoolCoordinatorEtcdSvcPort = "2379"
+	// DefaultPoolCoordinatorAPIServerSvcPort represents default pool coordinator apiServer port
+	DefaultPoolCoordinatorAPIServerSvcPort = "443"
 
-	YurtHubProxyPort       = "10261"
-	YurtHubPort            = "10267"
-	YurtHubProxySecurePort = "10268"
+	YurtHubNamespace      = "kube-system"
+	CacheUserAgentsKey    = "cache_agents"
+	PoolScopeResourcesKey = "pool_scope_resources"
+
+	YurtHubProxyPort       = 10261
+	YurtHubPort            = 10267
+	YurtHubProxySecurePort = 10268
 )
 
 var (
-	DefaultCacheAgents   = []string{"kubelet", "kube-proxy", "flanneld", "coredns", projectinfo.GetAgentName(), projectinfo.GetHubName()}
+	DefaultCacheAgents   = []string{"kubelet", "kube-proxy", "flanneld", "coredns", projectinfo.GetAgentName(), projectinfo.GetHubName(), coordinatorconstants.DefaultPoolScopedUserAgent}
 	YurthubConfigMapName = fmt.Sprintf("%s-hub-cfg", strings.TrimRightFunc(projectinfo.GetProjectPrefix(), func(c rune) bool { return c == '-' }))
 )
 
@@ -146,6 +145,19 @@ func ListSelectorFrom(ctx context.Context) (string, bool) {
 	return info, ok
 }
 
+// WithIfPoolScopedResource returns a copy of parent in which IfPoolScopedResource is set,
+// indicating whether this request is asking for pool-scoped resources.
+func WithIfPoolScopedResource(parent context.Context, ifPoolScoped bool) context.Context {
+	return WithValue(parent, ProxyPoolScopedResource, ifPoolScoped)
+}
+
+// IfPoolScopedResourceFrom returns the value of IfPoolScopedResource indicating whether this request
+// is asking for pool-scoped resource.
+func IfPoolScopedResourceFrom(ctx context.Context) (bool, bool) {
+	info, ok := ctx.Value(ProxyPoolScopedResource).(bool)
+	return info, ok
+}
+
 // ReqString formats a string for request
 func ReqString(req *http.Request) string {
 	ctx := req.Context()
@@ -166,18 +178,6 @@ func ReqInfoString(info *apirequest.RequestInfo) string {
 	return fmt.Sprintf("%s %s for %s", info.Verb, info.Resource, info.Path)
 }
 
-// IsKubeletLeaseReq judge whether the request is a lease request from kubelet
-func IsKubeletLeaseReq(req *http.Request) bool {
-	ctx := req.Context()
-	if comp, ok := ClientComponentFrom(ctx); !ok || comp != "kubelet" {
-		return false
-	}
-	if info, ok := apirequest.RequestInfoFrom(ctx); !ok || info.Resource != "leases" {
-		return false
-	}
-	return true
-}
-
 // WriteObject write object to response writer
 func WriteObject(statusCode int, obj runtime.Object, w http.ResponseWriter, req *http.Request) error {
 	ctx := req.Context()
@@ -194,20 +194,82 @@ func WriteObject(statusCode int, obj runtime.Object, w http.ResponseWriter, req 
 	return fmt.Errorf("request info is not found when write object, %s", ReqString(req))
 }
 
-// Err write err to response writer
-func Err(err error, w http.ResponseWriter, req *http.Request) {
-	ctx := req.Context()
-	if info, ok := apirequest.RequestInfoFrom(ctx); ok {
-		gv := schema.GroupVersion{
-			Group:   info.APIGroup,
-			Version: info.APIVersion,
+func NewTripleReadCloser(req *http.Request, rc io.ReadCloser, isRespBody bool) (io.ReadCloser, io.ReadCloser, io.ReadCloser) {
+	pr1, pw1 := io.Pipe()
+	pr2, pw2 := io.Pipe()
+	tr := &tripleReadCloser{
+		req: req,
+		rc:  rc,
+		pw1: pw1,
+		pw2: pw2,
+	}
+	return tr, pr1, pr2
+}
+
+type tripleReadCloser struct {
+	req *http.Request
+	rc  io.ReadCloser
+	pw1 *io.PipeWriter
+	pw2 *io.PipeWriter
+	// isRespBody shows rc(is.ReadCloser) is a response.Body
+	// or not(maybe a request.Body). if it is true(it's a response.Body),
+	// we should close the response body in Close func, else not,
+	// it(request body) will be closed by http request caller
+	isRespBody bool
+}
+
+// Read read data into p and write into pipe
+func (dr *tripleReadCloser) Read(p []byte) (n int, err error) {
+	defer func() {
+		if dr.req != nil && dr.isRespBody {
+			ctx := dr.req.Context()
+			info, _ := apirequest.RequestInfoFrom(ctx)
+			if info.IsResourceRequest {
+				comp, _ := ClientComponentFrom(ctx)
+				metrics.Metrics.AddProxyTrafficCollector(comp, info.Verb, info.Resource, info.Subresource, n)
+			}
 		}
-		negotiatedSerializer := serializer.YurtHubSerializer.GetNegotiatedSerializer(gv.WithResource(info.Resource))
-		responsewriters.ErrorNegotiated(err, negotiatedSerializer, gv, w, req)
-		return
+	}()
+
+	n, err = dr.rc.Read(p)
+	if n > 0 {
+		var n1, n2 int
+		var err error
+		if n1, err = dr.pw1.Write(p[:n]); err != nil {
+			klog.Errorf("tripleReader: failed to write to pw1 %v", err)
+			return n1, err
+		}
+		if n2, err = dr.pw2.Write(p[:n]); err != nil {
+			klog.Errorf("tripleReader: failed to write to pw2 %v", err)
+			return n2, err
+		}
 	}
 
-	klog.Errorf("request info is not found when err write, %s", ReqString(req))
+	return
+}
+
+// Close close two readers
+func (dr *tripleReadCloser) Close() error {
+	errs := make([]error, 0)
+	if dr.isRespBody {
+		if err := dr.rc.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if err := dr.pw1.Close(); err != nil {
+		errs = append(errs, err)
+	}
+
+	if err := dr.pw2.Close(); err != nil {
+		errs = append(errs, err)
+	}
+
+	if len(errs) != 0 {
+		return fmt.Errorf("failed to close dualReader, %v", errs)
+	}
+
+	return nil
 }
 
 // NewDualReadCloser create an dualReadCloser object
@@ -278,15 +340,6 @@ func (dr *dualReadCloser) Close() error {
 	return nil
 }
 
-// KeyFunc combine comp resource ns name into a key
-func KeyFunc(comp, resource, ns, name string) (string, error) {
-	if comp == "" || resource == "" {
-		return "", fmt.Errorf("createKey: comp, resource can not be empty")
-	}
-
-	return filepath.Join(comp, resource, ns, name), nil
-}
-
 // SplitKey split key into comp, resource, ns, name
 func SplitKey(key string) (comp, resource, ns, name string) {
 	if len(key) == 0 {
@@ -324,16 +377,6 @@ func IsSupportedLBMode(lbMode string) bool {
 	return false
 }
 
-// IsSupportedCertMode check cert mode is supported or not
-func IsSupportedCertMode(certMode string) bool {
-	switch certMode {
-	case YurtHubCertificateManagerName:
-		return true
-	}
-
-	return false
-}
-
 // IsSupportedWorkingMode check working mode is supported or not
 func IsSupportedWorkingMode(workingMode WorkingMode) bool {
 	switch workingMode {
@@ -352,87 +395,6 @@ func FileExists(filename string) (bool, error) {
 		return false, err
 	}
 	return true, nil
-}
-
-// LoadKubeletRestClientConfig load *rest.Config for accessing healthyServer
-func LoadKubeletRestClientConfig(healthyServer *url.URL, kubeletRootCAFilePath, kubeletPairFilePath string) (*rest.Config, error) {
-	tlsClientConfig := rest.TLSClientConfig{}
-	if _, err := certutil.NewPool(kubeletRootCAFilePath); err != nil {
-		klog.Errorf("Expected to load root CA config from %s, but got err: %v", kubeletRootCAFilePath, err)
-	} else {
-		tlsClientConfig.CAFile = kubeletRootCAFilePath
-	}
-
-	if can, _ := certutil.CanReadCertAndKey(kubeletPairFilePath, kubeletPairFilePath); !can {
-		return nil, fmt.Errorf("error reading %s, certificate and key must be supplied as a pair", kubeletPairFilePath)
-	}
-	tlsClientConfig.KeyFile = kubeletPairFilePath
-	tlsClientConfig.CertFile = kubeletPairFilePath
-
-	return &rest.Config{
-		Host:            healthyServer.String(),
-		TLSClientConfig: tlsClientConfig,
-	}, nil
-}
-
-func LoadRESTClientConfig(kubeconfig string) (*rest.Config, error) {
-	// Load structured kubeconfig data from the given path.
-	loader := &clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfig}
-	loadedConfig, err := loader.Load()
-	if err != nil {
-		return nil, err
-	}
-	// Flatten the loaded data to a particular restclient.Config based on the current context.
-	return clientcmd.NewNonInteractiveClientConfig(
-		*loadedConfig,
-		loadedConfig.CurrentContext,
-		&clientcmd.ConfigOverrides{},
-		loader,
-	).ClientConfig()
-}
-
-func LoadKubeConfig(kubeconfig string) (*clientcmdapi.Config, error) {
-	loader := &clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfig}
-	loadedConfig, err := loader.Load()
-	if err != nil {
-		return nil, err
-	}
-
-	return loadedConfig, nil
-}
-
-func CreateKubeConfigFile(kubeClientConfig *rest.Config, kubeconfigPath string) error {
-	// Get the CA data from the bootstrap client config.
-	caFile, caData := kubeClientConfig.CAFile, []byte{}
-	if len(caFile) == 0 {
-		caData = kubeClientConfig.CAData
-	}
-
-	// Build resulting kubeconfig.
-	kubeconfigData := clientcmdapi.Config{
-		// Define a cluster stanza based on the bootstrap kubeconfig.
-		Clusters: map[string]*clientcmdapi.Cluster{"default-cluster": {
-			Server:                   kubeClientConfig.Host,
-			InsecureSkipTLSVerify:    kubeClientConfig.Insecure,
-			CertificateAuthority:     caFile,
-			CertificateAuthorityData: caData,
-		}},
-		// Define auth based on the obtained client cert.
-		AuthInfos: map[string]*clientcmdapi.AuthInfo{"default-auth": {
-			ClientCertificate: kubeClientConfig.CertFile,
-			ClientKey:         kubeClientConfig.KeyFile,
-		}},
-		// Define a context that connects the auth info and cluster, and set it as the default
-		Contexts: map[string]*clientcmdapi.Context{"default-context": {
-			Cluster:   "default-cluster",
-			AuthInfo:  "default-auth",
-			Namespace: "default",
-		}},
-		CurrentContext: "default-context",
-	}
-
-	// Marshal to disk
-	return clientcmd.WriteToFile(kubeconfigData, kubeconfigPath)
 }
 
 // gzipReaderCloser will gunzip the data if response header
@@ -475,7 +437,6 @@ func NewGZipReaderCloser(header http.Header, body io.ReadCloser, req *http.Reque
 }
 
 func ParseTenantNs(certOrg string) string {
-
 	if !strings.Contains(certOrg, "openyurt:tenant:") {
 		return ""
 	}
@@ -484,20 +445,15 @@ func ParseTenantNs(certOrg string) string {
 }
 
 func ParseTenantNsFromOrgs(orgs []string) string {
-
+	var ns string
 	if len(orgs) == 0 {
-
-		return ""
+		return ns
 	}
 
-	ns := ""
 	for _, v := range orgs {
-
-		tns := ParseTenantNs(v)
-
-		if tns != "" {
-			ns = tns
-			break
+		ns := ParseTenantNs(v)
+		if len(ns) != 0 {
+			return ns
 		}
 	}
 
@@ -505,7 +461,6 @@ func ParseTenantNsFromOrgs(orgs []string) string {
 }
 
 func ParseBearerToken(token string) string {
-
 	if token == "" {
 		return ""
 	}

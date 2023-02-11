@@ -17,39 +17,20 @@ limitations under the License.
 package phases
 
 import (
-	"fmt"
 	"os"
 
 	"k8s.io/klog/v2"
 
 	"github.com/openyurtio/openyurt/pkg/yurtadm/constants"
-	"github.com/openyurtio/openyurt/pkg/yurtadm/kubernetes/kubeadm/app/cmd/phases/workflow"
-	"github.com/openyurtio/openyurt/pkg/yurtadm/util/edgenode"
 )
 
-func NewCleanYurtFilePhase() workflow.Phase {
-	return workflow.Phase{
-		Name:  "Clean up the directories and files related to openyurt.",
-		Short: "Clean up the directories and files related to openyurt.",
-		Run:   runCleanfile,
-	}
-}
-
-func runCleanfile(c workflow.RunData) error {
-	for _, comp := range []string{"kubectl", "kubeadm", "kubelet"} {
-		target := fmt.Sprintf("/usr/bin/%s", comp)
-		if err := os.RemoveAll(target); err != nil {
-			klog.Warningf("Clean file %s fail: %v, please clean it manually.", target, err)
-		}
-	}
-
+func RunCleanYurtFile() error {
 	for _, file := range []string{constants.KubeletWorkdir,
 		constants.YurttunnelAgentWorkdir,
 		constants.YurttunnelServerWorkdir,
 		constants.YurtHubWorkdir,
-		edgenode.KubeletSvcPath,
+		constants.KubeletSvcPath,
 		constants.KubeletServiceFilepath,
-		constants.KubeCniDir,
 		constants.KubeletConfigureDir,
 		constants.SysctlK8sConfig} {
 		if err := os.RemoveAll(file); err != nil {

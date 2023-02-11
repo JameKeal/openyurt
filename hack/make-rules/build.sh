@@ -22,11 +22,16 @@ source "${YURT_ROOT}/hack/lib/build.sh"
 
 readonly YURT_ALL_TARGETS=(
     yurtctl
+    yurtadm
     yurt-node-servant
     yurthub
     yurt-controller-manager
     yurt-tunnel-server
     yurt-tunnel-agent
 )
+
+# clean old binaries at GOOS and GOARCH
+# eg. _output/local/bin/linux/amd64
+rm -rf $(get_binary_dir_with_arch ${YURT_LOCAL_BIN_DIR})
 
 build_binaries "$@"

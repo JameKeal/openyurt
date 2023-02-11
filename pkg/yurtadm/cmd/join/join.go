@@ -20,10 +20,8 @@ package join
 import (
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
-	"github.com/lithammer/dedent"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
@@ -32,26 +30,12 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/klog/v2"
 
+	kubeconfigutil "github.com/openyurtio/openyurt/pkg/util/kubeconfig"
 	"github.com/openyurtio/openyurt/pkg/yurtadm/cmd/join/joindata"
-	yurtphase "github.com/openyurtio/openyurt/pkg/yurtadm/cmd/join/phases"
+	yurtphases "github.com/openyurtio/openyurt/pkg/yurtadm/cmd/join/phases"
 	yurtconstants "github.com/openyurtio/openyurt/pkg/yurtadm/constants"
-	"github.com/openyurtio/openyurt/pkg/yurtadm/kubernetes/kubeadm/app/cmd/options"
-	"github.com/openyurtio/openyurt/pkg/yurtadm/kubernetes/kubeadm/app/cmd/phases/workflow"
-	"github.com/openyurtio/openyurt/pkg/yurtadm/kubernetes/kubeadm/app/constants"
-	"github.com/openyurtio/openyurt/pkg/yurtadm/kubernetes/kubeadm/app/discovery/token"
-	kubeconfigutil "github.com/openyurtio/openyurt/pkg/yurtadm/kubernetes/kubeadm/app/util/kubeconfig"
+	"github.com/openyurtio/openyurt/pkg/yurtadm/util/edgenode"
 	yurtadmutil "github.com/openyurtio/openyurt/pkg/yurtadm/util/kubernetes"
-)
-
-var (
-	joinWorkerNodeDoneMsg = dedent.Dedent(`
-		This node has joined the cluster:
-		* Certificate signing request was sent to apiserver and a response was received.
-		* The Kubelet was informed of the new secure connection details.
-
-		Run 'kubectl get nodes' on the control-plane to see this node join the cluster.
-
-		`)
 )
 
 type joinOptions struct {
@@ -67,104 +51,145 @@ type joinOptions struct {
 	ignorePreflightErrors    []string
 	nodeLabels               string
 	kubernetesResourceServer string
+	yurthubServer            string
+	reuseCNIBin              bool
 }
 
 // newJoinOptions returns a struct ready for being used for creating cmd join flags.
 func newJoinOptions() *joinOptions {
 	return &joinOptions{
 		nodeType:                 yurtconstants.EdgeNode,
-		criSocket:                constants.DefaultDockerCRISocket,
+		criSocket:                yurtconstants.DefaultDockerCRISocket,
 		pauseImage:               yurtconstants.PauseImagePath,
 		yurthubImage:             fmt.Sprintf("%s/%s:%s", yurtconstants.DefaultOpenYurtImageRegistry, yurtconstants.Yurthub, yurtconstants.DefaultOpenYurtVersion),
 		caCertHashes:             make([]string, 0),
 		unsafeSkipCAVerification: false,
 		ignorePreflightErrors:    make([]string, 0),
 		kubernetesResourceServer: yurtconstants.DefaultKubernetesResourceServer,
+		yurthubServer:            yurtconstants.DefaultYurtHubServerAddr,
+		reuseCNIBin:              false,
 	}
 }
 
+type nodeJoiner struct {
+	*joinData
+	inReader     io.Reader
+	outWriter    io.Writer
+	outErrWriter io.Writer
+}
+
 // NewCmdJoin returns "yurtadm join" command.
-func NewCmdJoin(out io.Writer, joinOptions *joinOptions) *cobra.Command {
-	if joinOptions == nil {
-		joinOptions = newJoinOptions()
-	}
-	joinRunner := workflow.NewRunner()
+func NewCmdJoin(in io.Reader, out io.Writer, outErr io.Writer) *cobra.Command {
+	joinOptions := newJoinOptions()
 
 	cmd := &cobra.Command{
 		Use:   "join [api-server-endpoint]",
 		Short: "Run this on any machine you wish to join an existing cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := joinRunner.Run(args); err != nil {
+			o, err := newJoinData(args, joinOptions)
+			if err != nil {
 				return err
 			}
-			fmt.Fprint(out, joinWorkerNodeDoneMsg)
+
+			joiner := newJoinerWithJoinData(o, in, out, outErr)
+			if err := joiner.Run(); err != nil {
+				return err
+			}
 			return nil
 		},
 	}
 
 	addJoinConfigFlags(cmd.Flags(), joinOptions)
 
-	joinRunner.AppendPhase(yurtphase.NewPreparePhase())
-	joinRunner.AppendPhase(yurtphase.NewPreflightPhase())
-	joinRunner.AppendPhase(yurtphase.NewEdgeNodePhase())
-	joinRunner.AppendPhase(yurtphase.NewPostcheckPhase())
-	joinRunner.SetDataInitializer(func(cmd *cobra.Command, args []string) (workflow.RunData, error) {
-		return newJoinData(cmd, args, joinOptions, out)
-	})
-	joinRunner.BindToCommand(cmd)
 	return cmd
 }
 
 // addJoinConfigFlags adds join flags bound to the config to the specified flagset
 func addJoinConfigFlags(flagSet *flag.FlagSet, joinOptions *joinOptions) {
 	flagSet.StringVar(
-		&joinOptions.token, options.TokenStr, "",
+		&joinOptions.token, yurtconstants.TokenStr, "",
 		"Use this token for both discovery-token and tls-bootstrap-token when those values are not provided.",
 	)
 	flagSet.StringVar(
-		&joinOptions.nodeType, options.NodeType, joinOptions.nodeType,
+		&joinOptions.nodeType, yurtconstants.NodeType, joinOptions.nodeType,
 		"Sets the node is edge or cloud",
 	)
 	flagSet.StringVar(
-		&joinOptions.nodeName, options.NodeName, joinOptions.nodeName,
+		&joinOptions.nodeName, yurtconstants.NodeName, joinOptions.nodeName,
 		`Specify the node name. if not specified, hostname will be used.`,
 	)
 	flagSet.StringVar(
-		&joinOptions.criSocket, options.NodeCRISocket, joinOptions.criSocket,
+		&joinOptions.criSocket, yurtconstants.NodeCRISocket, joinOptions.criSocket,
 		"Path to the CRI socket to connect",
 	)
 	flagSet.StringVar(
-		&joinOptions.organizations, options.Organizations, joinOptions.organizations,
+		&joinOptions.organizations, yurtconstants.Organizations, joinOptions.organizations,
 		"Organizations that will be added into hub's client certificate",
 	)
 	flagSet.StringVar(
-		&joinOptions.pauseImage, options.PauseImage, joinOptions.pauseImage,
+		&joinOptions.pauseImage, yurtconstants.PauseImage, joinOptions.pauseImage,
 		"Sets the image version of pause container",
 	)
 	flagSet.StringVar(
-		&joinOptions.yurthubImage, options.YurtHubImage, joinOptions.yurthubImage,
+		&joinOptions.yurthubImage, yurtconstants.YurtHubImage, joinOptions.yurthubImage,
 		"Sets the image version of yurthub component",
 	)
 	flagSet.StringSliceVar(
-		&joinOptions.caCertHashes, options.TokenDiscoveryCAHash, joinOptions.caCertHashes,
+		&joinOptions.caCertHashes, yurtconstants.TokenDiscoveryCAHash, joinOptions.caCertHashes,
 		"For token-based discovery, validate that the root CA public key matches this hash (format: \"<type>:<value>\").",
 	)
 	flagSet.BoolVar(
-		&joinOptions.unsafeSkipCAVerification, options.TokenDiscoverySkipCAHash, false,
+		&joinOptions.unsafeSkipCAVerification, yurtconstants.TokenDiscoverySkipCAHash, false,
 		"For token-based discovery, allow joining without --discovery-token-ca-cert-hash pinning.",
 	)
 	flagSet.StringSliceVar(
-		&joinOptions.ignorePreflightErrors, options.IgnorePreflightErrors, joinOptions.ignorePreflightErrors,
+		&joinOptions.ignorePreflightErrors, yurtconstants.IgnorePreflightErrors, joinOptions.ignorePreflightErrors,
 		"A list of checks whose errors will be shown as warnings. Example: 'IsPrivilegedUser,Swap'. Value 'all' ignores errors from all checks.",
 	)
 	flagSet.StringVar(
-		&joinOptions.nodeLabels, options.NodeLabels, joinOptions.nodeLabels,
+		&joinOptions.nodeLabels, yurtconstants.NodeLabels, joinOptions.nodeLabels,
 		"Sets the labels for joining node",
 	)
 	flagSet.StringVar(
-		&joinOptions.kubernetesResourceServer, options.KubernetesResourceServer, joinOptions.kubernetesResourceServer,
+		&joinOptions.kubernetesResourceServer, yurtconstants.KubernetesResourceServer, joinOptions.kubernetesResourceServer,
 		"Sets the address for downloading k8s node resources",
 	)
+	flagSet.StringVar(
+		&joinOptions.yurthubServer, yurtconstants.YurtHubServerAddr, joinOptions.yurthubServer,
+		"Sets the address for yurthub server addr",
+	)
+	flagSet.BoolVar(
+		&joinOptions.reuseCNIBin, yurtconstants.ReuseCNIBin, false,
+		"Whether to reuse local CNI binaries or to download new ones",
+	)
+}
+
+func newJoinerWithJoinData(o *joinData, in io.Reader, out io.Writer, outErr io.Writer) *nodeJoiner {
+	return &nodeJoiner{
+		o,
+		in,
+		out,
+		outErr,
+	}
+}
+
+// Run use kubeadm to join the node.
+func (nodeJoiner *nodeJoiner) Run() error {
+	joinData := nodeJoiner.joinData
+
+	if err := yurtphases.RunPrepare(joinData); err != nil {
+		return err
+	}
+
+	if err := yurtphases.RunJoinNode(joinData, nodeJoiner.outWriter, nodeJoiner.outErrWriter); err != nil {
+		return err
+	}
+
+	if err := yurtphases.RunPostCheck(joinData); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 type joinData struct {
@@ -178,15 +203,17 @@ type joinData struct {
 	pauseImage               string
 	yurthubImage             string
 	kubernetesVersion        string
-	caCertHashes             sets.String
+	caCertHashes             []string
 	nodeLabels               map[string]string
 	kubernetesResourceServer string
+	yurthubServer            string
+	reuseCNIBin              bool
 }
 
 // newJoinData returns a new joinData struct to be used for the execution of the kubeadm join workflow.
 // This func takes care of validating joinOptions passed to the command, and then it converts
 // options into the internal JoinData type that is used as input all the phases in the kubeadm join workflow
-func newJoinData(cmd *cobra.Command, args []string, opt *joinOptions, out io.Writer) (*joinData, error) {
+func newJoinData(args []string, opt *joinOptions) (*joinData, error) {
 	// if an APIServerEndpoint from which to retrieve cluster information was not provided, unset the Discovery.BootstrapToken object
 	var apiServerEndpoint string
 	if len(args) == 0 {
@@ -195,6 +222,8 @@ func newJoinData(cmd *cobra.Command, args []string, opt *joinOptions, out io.Wri
 		if len(args) > 1 {
 			klog.Warningf("[preflight] WARNING: More than one API server endpoint supplied on command line %v. Using the first one.", args)
 		}
+		// if join multiple masters, apiServerEndpoint may be like:
+		// 1.2.3.4:6443,1.2.3.5:6443,1.2.3.6:6443
 		apiServerEndpoint = args[0]
 	}
 
@@ -217,16 +246,11 @@ func newJoinData(cmd *cobra.Command, args []string, opt *joinOptions, out io.Wri
 		ignoreErrors.Insert(opt.ignorePreflightErrors[i])
 	}
 
-	// Either use the config file if specified, or convert public kubeadm API to the internal JoinConfiguration
-	// and validates JoinConfiguration
-	name := opt.nodeName
-	if name == "" {
-		klog.V(1).Infoln("[preflight] found NodeName empty; using OS hostname as NodeName")
-		hostname, err := os.Hostname()
-		if err != nil {
-			return nil, err
-		}
-		name = hostname
+	// Either use specified nodename or get hostname from OS envs
+	name, err := edgenode.GetHostname(opt.nodeName)
+	if err != nil {
+		klog.Errorf("failed to get node name, %v", err)
+		return nil, err
 	}
 
 	data := &joinData{
@@ -236,7 +260,8 @@ func newJoinData(cmd *cobra.Command, args []string, opt *joinOptions, out io.Wri
 		ignorePreflightErrors: ignoreErrors,
 		pauseImage:            opt.pauseImage,
 		yurthubImage:          opt.yurthubImage,
-		caCertHashes:          sets.NewString(opt.caCertHashes...),
+		yurthubServer:         opt.yurthubServer,
+		caCertHashes:          opt.caCertHashes,
 		organizations:         opt.organizations,
 		nodeLabels:            make(map[string]string),
 		joinNodeData: &joindata.NodeRegistration{
@@ -246,6 +271,7 @@ func newJoinData(cmd *cobra.Command, args []string, opt *joinOptions, out io.Wri
 			Organizations: opt.organizations,
 		},
 		kubernetesResourceServer: opt.kubernetesResourceServer,
+		reuseCNIBin:              opt.reuseCNIBin,
 	}
 
 	// parse node labels
@@ -262,7 +288,7 @@ func newJoinData(cmd *cobra.Command, args []string, opt *joinOptions, out io.Wri
 	}
 
 	// get tls bootstrap config
-	cfg, err := token.RetrieveBootstrapConfig(data)
+	cfg, err := yurtadmutil.RetrieveBootstrapConfig(data)
 	if err != nil {
 		klog.Errorf("failed to retrieve bootstrap config, %v", err)
 		return nil, err
@@ -308,6 +334,11 @@ func (j *joinData) YurtHubImage() string {
 	return j.yurthubImage
 }
 
+// YurtHubServer returns the YurtHub server addr.
+func (j *joinData) YurtHubServer() string {
+	return j.yurthubServer
+}
+
 // KubernetesVersion returns the kubernetes version.
 func (j *joinData) KubernetesVersion() string {
 	return j.kubernetesVersion
@@ -332,7 +363,7 @@ func (j *joinData) IgnorePreflightErrors() sets.String {
 	return j.ignorePreflightErrors
 }
 
-func (j *joinData) CaCertHashes() sets.String {
+func (j *joinData) CaCertHashes() []string {
 	return j.caCertHashes
 }
 
@@ -342,4 +373,8 @@ func (j *joinData) NodeLabels() map[string]string {
 
 func (j *joinData) KubernetesResourceServer() string {
 	return j.kubernetesResourceServer
+}
+
+func (j *joinData) ReuseCNIBin() bool {
+	return j.reuseCNIBin
 }

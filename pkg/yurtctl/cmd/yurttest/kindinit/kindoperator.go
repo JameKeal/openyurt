@@ -18,6 +18,7 @@ package kindinit
 
 import (
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -25,7 +26,7 @@ import (
 
 	"k8s.io/klog/v2"
 
-	strutil "github.com/openyurtio/openyurt/pkg/yurtadm/util/strings"
+	strutil "github.com/openyurtio/openyurt/pkg/util/strings"
 )
 
 var (
@@ -76,25 +77,30 @@ func (k *KindOperator) KindVersion() (string, error) {
 	return ver, nil
 }
 
-func (k *KindOperator) KindLoadDockerImage(clusterName, image string, nodeNames []string) error {
+func (k *KindOperator) KindLoadDockerImage(out io.Writer, clusterName, image string, nodeNames []string) error {
 	nodeArgs := strings.Join(nodeNames, ",")
 	klog.V(1).Infof("load image %s to nodes %s in cluster %s", image, nodeArgs, clusterName)
-	output, err := k.execCommand(k.kindCMDPath, "load", "docker-image", image, "--name", clusterName, "--nodes", nodeArgs).CombinedOutput()
-	klog.Info(string(output))
-	if err != nil {
+	cmd := k.execCommand(k.kindCMDPath, "load", "docker-image", image, "--name", clusterName, "--nodes", nodeArgs)
+	if out != nil {
+		cmd.Stdout = out
+		cmd.Stderr = out
+	}
+	if err := cmd.Run(); err != nil {
 		klog.Errorf("failed to load docker image %s to nodes %s in cluster %s, %v", image, nodeArgs, clusterName, err)
 		return err
 	}
 	return nil
 }
 
-func (k *KindOperator) KindCreateClusterWithConfig(configPath string) error {
-	out, err := k.execCommand(k.kindCMDPath, "create", "cluster", "--config", configPath, "--kubeconfig", k.kubeconfigPath).CombinedOutput()
-	if err != nil {
-		klog.Error(string(out))
+func (k *KindOperator) KindCreateClusterWithConfig(out io.Writer, configPath string) error {
+	cmd := k.execCommand(k.kindCMDPath, "create", "cluster", "--config", configPath, "--kubeconfig", k.kubeconfigPath)
+	if out != nil {
+		cmd.Stdout = out
+		cmd.Stderr = out
+	}
+	if err := cmd.Run(); err != nil {
 		return err
 	}
-	klog.Info(string(out))
 	return nil
 }
 
@@ -158,11 +164,12 @@ func (k *KindOperator) goMinorVersion() (int, error) {
 }
 
 func getGoBinPath() (string, error) {
-	gopath, err := exec.Command("bash", "-c", "go env GOPATH").CombinedOutput()
+	buf, err := exec.Command("bash", "-c", "go env GOPATH").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("failed to get GOPATH, %w", err)
 	}
-	return filepath.Join(string(gopath), "bin"), nil
+	gopath := strings.TrimSuffix(string(buf), "\n")
+	return filepath.Join(gopath, "bin"), nil
 }
 
 func checkIfKindAt(path string) (bool, string) {
@@ -173,6 +180,7 @@ func checkIfKindAt(path string) (bool, string) {
 }
 
 func findKindPath() (string, error) {
+
 	var kindPath string
 	if exist, path := checkIfKindAt("kind"); exist {
 		kindPath = path

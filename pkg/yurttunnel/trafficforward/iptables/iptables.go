@@ -34,13 +34,13 @@ import (
 	utilnet "k8s.io/utils/net"
 
 	"github.com/openyurtio/openyurt/pkg/projectinfo"
+	"github.com/openyurtio/openyurt/pkg/util/ip"
 	"github.com/openyurtio/openyurt/pkg/util/iptables"
 	"github.com/openyurtio/openyurt/pkg/yurttunnel/server/metrics"
 	"github.com/openyurtio/openyurt/pkg/yurttunnel/util"
 )
 
 const (
-	loopbackAddr              = "127.0.0.1"
 	reqReturnComment          = "return request to access node directly"
 	dnatToTunnelComment       = "dnat to tunnel for access node"
 	yurttunnelServerPortChain = "TUNNEL-PORT"
@@ -72,7 +72,7 @@ type iptablesJumpChain struct {
 	extraArgs []string
 }
 
-// IptableManager interface defines the method for adding dnat rules to host
+// IptablesManager interface defines the method for adding dnat rules to host
 // that needs to send network packages to kubelets
 type IptablesManager interface {
 	Run(stopCh <-chan struct{}, wg *sync.WaitGroup)
@@ -84,6 +84,7 @@ type iptablesManager struct {
 	nodeInformer     coreinformer.NodeInformer
 	iptables         iptables.Interface
 	execer           exec.Interface
+	loopbackAddr     string
 	conntrackPath    string
 	secureDnatDest   string
 	insecureDnatDest string
@@ -92,18 +93,18 @@ type iptablesManager struct {
 	syncPeriod       int
 }
 
-// NewIptablesManager creates an IptablesManager; deletes old chains, if any;
+// NewIptablesManagerWithIPFamily creates an IptablesManager; deletes old chains, if any;
 // generates new dnat rules based on IPs of current active nodes; and
 // appends the rules to the iptable.
-func NewIptablesManager(client clientset.Interface,
+func NewIptablesManagerWithIPFamily(client clientset.Interface,
 	nodeInformer coreinformer.NodeInformer,
 	listenAddr string,
 	listenInsecureAddr string,
-	syncPeriod int) IptablesManager {
+	syncPeriod int,
+	ipFamily iptables.Protocol) IptablesManager {
 
-	protocol := iptables.ProtocolIpv4
 	execer := exec.New()
-	iptInterface := iptables.New(execer, protocol)
+	iptInterface := iptables.New(execer, ipFamily)
 
 	if syncPeriod < defaultSyncPeriod {
 		syncPeriod = defaultSyncPeriod
@@ -121,6 +122,8 @@ func NewIptablesManager(client clientset.Interface,
 		syncPeriod:       syncPeriod,
 	}
 
+	im.loopbackAddr = ip.MustGetLoopbackIP(ipFamily == iptables.ProtocolIpv6)
+
 	// conntrack setting
 	conntrackPath, err := im.execer.LookPath("conntrack")
 	if err != nil {
@@ -133,6 +136,15 @@ func NewIptablesManager(client clientset.Interface,
 	_ = im.deleteJumpChains(iptablesJumpChains)
 
 	return im
+}
+
+// NewIptablesManager creates an IptablesManager with ipv4 protocol
+func NewIptablesManager(client clientset.Interface,
+	nodeInformer coreinformer.NodeInformer,
+	listenAddr string,
+	listenInsecureAddr string,
+	syncPeriod int) IptablesManager {
+	return NewIptablesManagerWithIPFamily(client, nodeInformer, listenAddr, listenInsecureAddr, syncPeriod, iptables.ProtocolIpv4)
 }
 
 // Run starts the iptablesManager that will updates dnat rules periodically
@@ -361,7 +373,7 @@ func (im *iptablesManager) ensurePortIptables(port string, currentIPs, deletedIP
 			iptables.Prepend,
 			iptables.TableNAT, portChain, reqReturnPortIptablesArgs...)
 		if err != nil {
-			klog.Errorf("could not ensure -j RETURN iptables rule for %s:%s: %v", ip, port, err)
+			klog.Errorf("could not ensure -j RETURN iptables rule for %s: %v", net.JoinHostPort(ip, port), err)
 			return err
 		}
 	}
@@ -382,7 +394,7 @@ func (im *iptablesManager) ensurePortIptables(port string, currentIPs, deletedIP
 		err = im.iptables.DeleteRule(iptables.TableNAT,
 			portChain, deletedIPIptablesArgs...)
 		if err != nil {
-			klog.Errorf("could not delete old iptables rules for %s:%s: %v", ip, port, err)
+			klog.Errorf("could not delete old iptables rules for %s: %v", net.JoinHostPort(ip, port), err)
 			return err
 		}
 	}
@@ -453,19 +465,17 @@ func toCIDR(ip net.IP) string {
 	return fmt.Sprintf("%s/%d", ip.String(), size)
 }
 
-func (im *iptablesManager) clearConnTrackEntries(ips, ports []string) error {
+func (im *iptablesManager) clearConnTrackEntries(ips, ports []string) {
 	if len(im.conntrackPath) == 0 {
-		return nil
+		return
 	}
 	klog.Infof("clear conntrack entries for ports %q and nodes %q", ports, ips)
 	for _, port := range ports {
 		for _, ip := range ips {
-			if err := im.clearConnTrackEntriesForIPPort(ip, port); err != nil {
-				return err
-			}
+			im.clearConnTrackEntriesForIPPort(ip, port)
 		}
 	}
-	return nil
+	return
 }
 
 func (im *iptablesManager) clearConnTrackEntriesForIPPort(ip, port string) error {
@@ -503,13 +513,13 @@ func (im *iptablesManager) syncIptableSetting() {
 		klog.Errorf("failed to sync iptables rules, %v", err)
 		return
 	}
-	portsChanged, deletedDnatPorts := im.getDeletedPorts(dnatPorts)
+	portsChanged, deletedDnatPorts := getDeletedPorts(im.lastDnatPorts, dnatPorts)
 	currentDnatPorts := append(dnatPorts, util.KubeletHTTPSPort, util.KubeletHTTPPort)
 
 	// check if there are new nodes
 	nodesIP := im.getIPOfNodesWithoutAgent()
-	nodesChanged, addedNodesIP, deletedNodesIP := im.getAddedAndDeletedNodes(nodesIP)
-	currentNodesIP := append(nodesIP, loopbackAddr)
+	nodesChanged, addedNodesIP, deletedNodesIP := getAddedAndDeletedNodes(im.lastNodesIP, nodesIP)
+	currentNodesIP := append(nodesIP, im.loopbackAddr)
 
 	// update the iptables setting if necessary
 	err = im.ensurePortsIptables(currentDnatPorts, deletedDnatPorts, currentNodesIP, deletedNodesIP, portMappings)
@@ -534,16 +544,16 @@ func (im *iptablesManager) syncIptableSetting() {
 	}
 }
 
-func (im *iptablesManager) getAddedAndDeletedNodes(currentNodesIP []string) (bool, []string, []string) {
+func getAddedAndDeletedNodes(lastNodesIP, currentNodesIP []string) (bool, []string, []string) {
 	currentNodesIPSet := sets.NewString(currentNodesIP...)
-	lastNodesIpSet := sets.NewString(im.lastNodesIP...)
+	lastNodesIpSet := sets.NewString(lastNodesIP...)
 
-	return currentNodesIPSet.Equal(lastNodesIpSet), currentNodesIPSet.Difference(lastNodesIpSet).List(), lastNodesIpSet.Difference(currentNodesIPSet).List()
+	return !currentNodesIPSet.Equal(lastNodesIpSet), currentNodesIPSet.Difference(lastNodesIpSet).List(), lastNodesIpSet.Difference(currentNodesIPSet).List()
 }
 
-func (im *iptablesManager) getDeletedPorts(currentPorts []string) (bool, []string) {
+func getDeletedPorts(lastDnatPorts, currentPorts []string) (bool, []string) {
 	currentPortsSet := sets.NewString(currentPorts...)
-	lastDnatPortsSet := sets.NewString(im.lastDnatPorts...)
+	lastDnatPortsSet := sets.NewString(lastDnatPorts...)
 
-	return currentPortsSet.Equal(lastDnatPortsSet), lastDnatPortsSet.Difference(currentPortsSet).List()
+	return !currentPortsSet.Equal(lastDnatPortsSet), lastDnatPortsSet.Difference(currentPortsSet).List()
 }

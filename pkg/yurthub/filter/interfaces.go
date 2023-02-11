@@ -21,36 +21,41 @@ import (
 	"net/http"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
-type FilterInitializer interface {
-	Initialize(filter Runner) error
+type Initializer interface {
+	Initialize(filter ObjectFilter) error
 }
 
 // Approver check the response of specified request need to go through filter or not.
-// and get the filter name for the specified request.
+// and get all filters' names for the specified request.
 type Approver interface {
-	Approve(req *http.Request) bool
-	GetFilterName(req *http.Request) string
+	Approve(req *http.Request) (bool, []string)
 }
 
-// Runner is the actor for response filter
-type Runner interface {
+// ResponseFilter is used for filtering response for get/list/watch requests.
+// it only prepares the common framework for ObjectFilter and don't cover
+// the filter logic.
+type ResponseFilter interface {
+	Name() string
 	// Filter is used to filter data returned from the cloud.
 	Filter(req *http.Request, rc io.ReadCloser, stopCh <-chan struct{}) (int, io.ReadCloser, error)
 }
 
-// Handler customizes data filtering processing interface for each handler.
-// In the data filtering framework, data is mainly divided into two types:
-// 	Object data: data returned by list/get request.
-// 	Streaming data: The data returned by the watch request will be continuously pushed to the edge by the cloud.
-type Handler interface {
-	// StreamResponseFilter is used to filter processing of streaming data.
-	StreamResponseFilter(rc io.ReadCloser, ch chan watch.Event) error
-
-	// ObjectResponseFilter is used to filter processing of object data.
-	ObjectResponseFilter(b []byte) ([]byte, error)
+// ObjectFilter is used for filtering runtime object.
+// runtime object includes List object(like ServiceList) that has multiple items and
+// Standalone object(like Service).
+// Every Filter need to implement ObjectFilter interface.
+type ObjectFilter interface {
+	Name() string
+	// SupportedResourceAndVerbs is used to specify which resource and request verb is supported by the filter.
+	// Because each filter can make sure what requests with resource and verb can be handled.
+	SupportedResourceAndVerbs() map[string]sets.String
+	// Filter is used for filtering runtime object
+	// all filter logic should be located in it.
+	Filter(obj runtime.Object, stopCh <-chan struct{}) runtime.Object
 }
 
 type NodeGetter func(name string) (*v1.Node, error)

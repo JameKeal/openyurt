@@ -17,46 +17,51 @@ limitations under the License.
 package masterservice
 
 import (
-	"io"
-	"net"
-	"net/http"
 	"strconv"
 
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
 	"github.com/openyurtio/openyurt/pkg/yurthub/filter"
-	filterutil "github.com/openyurtio/openyurt/pkg/yurthub/filter/util"
-	"github.com/openyurtio/openyurt/pkg/yurthub/kubernetes/serializer"
+)
+
+const (
+	MasterServiceNamespace = "default"
+	MasterServiceName      = "kubernetes"
+	MasterServicePortName  = "https"
 )
 
 // Register registers a filter
 func Register(filters *filter.Filters) {
-	filters.Register(filter.MasterServiceFilterName, func() (filter.Runner, error) {
-		return NewFilter(), nil
+	filters.Register(filter.MasterServiceFilterName, func() (filter.ObjectFilter, error) {
+		return &masterServiceFilter{}, nil
 	})
 }
 
-func NewFilter() *masterServiceFilter {
-	return &masterServiceFilter{}
-}
-
 type masterServiceFilter struct {
-	serializerManager *serializer.SerializerManager
-	host              string
-	port              int32
+	host string
+	port int32
 }
 
-func (msf *masterServiceFilter) SetSerializerManager(s *serializer.SerializerManager) error {
-	msf.serializerManager = s
-	return nil
+func (msf *masterServiceFilter) Name() string {
+	return filter.MasterServiceFilterName
 }
 
-func (msf *masterServiceFilter) SetMasterServiceAddr(addr string) error {
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return err
+func (msf *masterServiceFilter) SupportedResourceAndVerbs() map[string]sets.String {
+	return map[string]sets.String{
+		"services": sets.NewString("list", "watch"),
 	}
+}
+
+func (msf *masterServiceFilter) SetMasterServiceHost(host string) error {
 	msf.host = host
+	return nil
+
+}
+
+func (msf *masterServiceFilter) SetMasterServicePort(portStr string) error {
 	port, err := strconv.ParseInt(portStr, 10, 32)
 	if err != nil {
 		return err
@@ -65,13 +70,37 @@ func (msf *masterServiceFilter) SetMasterServiceAddr(addr string) error {
 	return nil
 }
 
-func (msf *masterServiceFilter) Filter(req *http.Request, rc io.ReadCloser, stopCh <-chan struct{}) (int, io.ReadCloser, error) {
-	s := filterutil.CreateSerializer(req, msf.serializerManager)
-	if s == nil {
-		klog.Errorf("skip filter, failed to create serializer in masterServiceFilter")
-		return 0, rc, nil
+func (msf *masterServiceFilter) Filter(obj runtime.Object, _ <-chan struct{}) runtime.Object {
+	switch v := obj.(type) {
+	case *v1.ServiceList:
+		for i := range v.Items {
+			newSvc, mutated := msf.mutateMasterService(&v.Items[i])
+			if mutated {
+				v.Items[i] = *newSvc
+				break
+			}
+		}
+		return v
+	case *v1.Service:
+		svc, _ := msf.mutateMasterService(v)
+		return svc
+	default:
+		return v
 	}
+}
 
-	handler := NewMasterServiceFilterHandler(req, s, msf.host, msf.port)
-	return filter.NewFilterReadCloser(req, rc, handler, s, filter.MasterServiceFilterName, stopCh)
+func (msf *masterServiceFilter) mutateMasterService(svc *v1.Service) (*v1.Service, bool) {
+	mutated := false
+	if svc.Namespace == MasterServiceNamespace && svc.Name == MasterServiceName {
+		svc.Spec.ClusterIP = msf.host
+		for j := range svc.Spec.Ports {
+			if svc.Spec.Ports[j].Name == MasterServicePortName {
+				svc.Spec.Ports[j].Port = msf.port
+				break
+			}
+		}
+		mutated = true
+		klog.V(2).Infof("mutate master service with ClusterIP:Port=%s:%d", msf.host, msf.port)
+	}
+	return svc, mutated
 }

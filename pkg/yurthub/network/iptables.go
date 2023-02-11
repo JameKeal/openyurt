@@ -22,6 +22,7 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/exec"
+	utilnet "k8s.io/utils/net"
 
 	"github.com/openyurtio/openyurt/pkg/util/iptables"
 )
@@ -40,6 +41,9 @@ type IptablesManager struct {
 
 func NewIptablesManager(dummyIfIP, dummyIfPort string) *IptablesManager {
 	protocol := iptables.ProtocolIpv4
+	if utilnet.IsIPv6String(dummyIfIP) {
+		protocol = iptables.ProtocolIpv6
+	}
 	execer := exec.New()
 	iptInterface := iptables.New(execer, protocol)
 
@@ -53,26 +57,10 @@ func NewIptablesManager(dummyIfIP, dummyIfPort string) *IptablesManager {
 
 func makeupIptablesRules(ifIP, ifPort string) []iptablesRule {
 	return []iptablesRule{
-		// skip connection track for traffic from container to 169.254.2.1:10261
-		{iptables.Prepend, iptables.Table("raw"), iptables.ChainPrerouting, []string{"-p", "tcp", "--dport", ifPort, "--destination", ifIP, "-j", "NOTRACK"}},
-		// skip connection track for traffic from host network to 169.254.2.1:10261
-		{iptables.Prepend, iptables.Table("raw"), iptables.ChainOutput, []string{"-p", "tcp", "--dport", ifPort, "--destination", ifIP, "-j", "NOTRACK"}},
-		// accept traffic to 169.254.2.1:10261
+		// accept traffic to 169.254.2.1:10261/169.254.2.1:10268
 		{iptables.Prepend, iptables.TableFilter, iptables.ChainInput, []string{"-p", "tcp", "-m", "comment", "--comment", "for container access hub agent", "--dport", ifPort, "--destination", ifIP, "-j", "ACCEPT"}},
-		// skip connection track for traffic from 169.254.2.1:10261
-		{iptables.Prepend, iptables.Table("raw"), iptables.ChainOutput, []string{"-p", "tcp", "--sport", ifPort, "-s", ifIP, "-j", "NOTRACK"}},
-		// accept traffic from 169.254.2.1:10261
+		// accept traffic from 169.254.2.1:10261/169.254.2.1:10268
 		{iptables.Prepend, iptables.TableFilter, iptables.ChainOutput, []string{"-p", "tcp", "--sport", ifPort, "-s", ifIP, "-j", "ACCEPT"}},
-		// skip connection track for traffic from container to 127.0.0.1:10261
-		{iptables.Prepend, iptables.Table("raw"), iptables.ChainPrerouting, []string{"-p", "tcp", "--dport", ifPort, "--destination", "127.0.0.1", "-j", "NOTRACK"}},
-		// skip connection track for traffic from host network to 127.0.0.1:10261
-		{iptables.Prepend, iptables.Table("raw"), iptables.ChainOutput, []string{"-p", "tcp", "--dport", ifPort, "--destination", "127.0.0.1", "-j", "NOTRACK"}},
-		// accept traffic to 127.0.0.1:10261
-		{iptables.Prepend, iptables.TableFilter, iptables.ChainInput, []string{"-p", "tcp", "--dport", ifPort, "--destination", "127.0.0.1", "-j", "ACCEPT"}},
-		// skip connection track for traffic from 127.0.0.1:10261
-		{iptables.Prepend, iptables.Table("raw"), iptables.ChainOutput, []string{"-p", "tcp", "--sport", ifPort, "-s", "127.0.0.1", "-j", "NOTRACK"}},
-		// accept traffic from 127.0.0.1:10261
-		{iptables.Prepend, iptables.TableFilter, iptables.ChainOutput, []string{"-p", "tcp", "--sport", ifPort, "-s", "127.0.0.1", "-j", "ACCEPT"}},
 	}
 }
 

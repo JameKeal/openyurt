@@ -19,6 +19,7 @@ package kindinit
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,16 +31,16 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/client-go/kubernetes"
+	kubeclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 
 	nodeservant "github.com/openyurtio/openyurt/pkg/node-servant"
-	kubeutil "github.com/openyurtio/openyurt/pkg/yurtadm/util/kubernetes"
-	strutil "github.com/openyurtio/openyurt/pkg/yurtadm/util/strings"
-	tmplutil "github.com/openyurtio/openyurt/pkg/yurtadm/util/templates"
+	"github.com/openyurtio/openyurt/pkg/projectinfo"
+	strutil "github.com/openyurtio/openyurt/pkg/util/strings"
+	tmplutil "github.com/openyurtio/openyurt/pkg/util/templates"
 	"github.com/openyurtio/openyurt/pkg/yurtctl/constants"
-	"github.com/openyurtio/openyurt/pkg/yurthub/filter/servicetopology"
+	kubeutil "github.com/openyurtio/openyurt/pkg/yurtctl/util/kubernetes"
 )
 
 var (
@@ -52,18 +53,11 @@ var (
 		"v1.22",
 		"v1.23",
 	}
-	validOpenYurtVersions = []string{
-		"v0.5.0",
-		"v0.6.0",
-		"v0.6.1",
-		"v0.6.2",
-		"v0.7.0",
-		"latest",
-	}
 	validKindVersions = []string{
 		"v0.11.1",
 		"v0.12.0",
 	}
+	AllValidOpenYurtVersions = append(projectinfo.Get().AllVersions, "latest")
 
 	kindNodeImageMap = map[string]map[string]string{
 		"v0.11.1": {
@@ -98,7 +92,7 @@ var (
 	}
 )
 
-func NewKindInitCMD() *cobra.Command {
+func NewKindInitCMD(out io.Writer) *cobra.Command {
 	o := newKindOptions()
 
 	cmd := &cobra.Command{
@@ -108,7 +102,7 @@ func NewKindInitCMD() *cobra.Command {
 			if err := o.Validate(); err != nil {
 				return err
 			}
-			initializer := newKindInitializer(o.Config())
+			initializer := newKindInitializer(out, o.Config())
 			if err := initializer.Run(); err != nil {
 				return err
 			}
@@ -116,7 +110,7 @@ func NewKindInitCMD() *cobra.Command {
 		},
 		Args: cobra.NoArgs,
 	}
-
+	cmd.SetOut(out)
 	addFlags(cmd.Flags(), o)
 	return cmd
 }
@@ -132,6 +126,7 @@ type kindOptions struct {
 	KubeConfig        string
 	IgnoreError       bool
 	EnableDummyIf     bool
+	DisableDefaultCNI bool
 }
 
 func newKindOptions() *kindOptions {
@@ -144,6 +139,7 @@ func newKindOptions() *kindOptions {
 		UseLocalImages:    false,
 		IgnoreError:       false,
 		EnableDummyIf:     true,
+		DisableDefaultCNI: false,
 	}
 }
 
@@ -211,6 +207,7 @@ func (o *kindOptions) Config() *initializerConfig {
 		YurtTunnelServerImage:      fmt.Sprintf(yurtTunnelServerImageFormat, o.OpenYurtVersion),
 		YurtTunnelAgentImage:       fmt.Sprintf(yurtTunnelAgentImageFormat, o.OpenYurtVersion),
 		EnableDummyIf:              o.EnableDummyIf,
+		DisableDefaultCNI:          o.DisableDefaultCNI,
 	}
 }
 
@@ -236,6 +233,9 @@ func addFlags(flagset *pflag.FlagSet, o *kindOptions) {
 		"Ignore error when using openyurt version that is not officially released.")
 	flagset.BoolVar(&o.EnableDummyIf, "enable-dummy-if", o.EnableDummyIf,
 		"Enable dummy interface for yurthub component or not. and recommend to set false on mac env")
+	flagset.BoolVar(&o.DisableDefaultCNI, "disable-default-cni", o.DisableDefaultCNI,
+		"Disable the default cni of kind cluster which is kindnet. "+
+			"If this option is set, you should check the ready status of pods by yourself after installing your CNI.")
 }
 
 type initializerConfig struct {
@@ -254,17 +254,20 @@ type initializerConfig struct {
 	YurtTunnelServerImage      string
 	YurtTunnelAgentImage       string
 	EnableDummyIf              bool
+	DisableDefaultCNI          bool
 }
 
 type Initializer struct {
 	initializerConfig
+	out        io.Writer
 	operator   *KindOperator
-	kubeClient *kubernetes.Clientset
+	kubeClient kubeclientset.Interface
 }
 
-func newKindInitializer(cfg *initializerConfig) *Initializer {
+func newKindInitializer(out io.Writer, cfg *initializerConfig) *Initializer {
 	return &Initializer{
 		initializerConfig: *cfg,
+		out:               out,
 		operator:          NewKindOperator("", cfg.KubeConfig),
 	}
 }
@@ -286,7 +289,7 @@ func (ki *Initializer) Run() error {
 	}
 
 	klog.Info("Start to create cluster with kind")
-	if err := ki.operator.KindCreateClusterWithConfig(ki.KindConfigPath); err != nil {
+	if err := ki.operator.KindCreateClusterWithConfig(ki.out, ki.KindConfigPath); err != nil {
 		return err
 	}
 
@@ -295,7 +298,7 @@ func (ki *Initializer) Run() error {
 	if err != nil {
 		return err
 	}
-	ki.kubeClient, err = kubernetes.NewForConfig(kubeconfig)
+	ki.kubeClient, err = kubeclientset.NewForConfig(kubeconfig)
 	if err != nil {
 		return err
 	}
@@ -305,7 +308,7 @@ func (ki *Initializer) Run() error {
 		return err
 	}
 
-	klog.Info("Start to configure kube-apiserver and kube-controller-manager")
+	klog.Info("Start to configure kube-apiserver")
 	if err := ki.configureControlPlane(); err != nil {
 		return err
 	}
@@ -315,7 +318,7 @@ func (ki *Initializer) Run() error {
 		return err
 	}
 
-	klog.Infof("Start to configure coredns and kube-proxy to adapt OpenYurt")
+	klog.Infof("Start to configure coredns to adapt OpenYurt")
 	if err := ki.configureAddons(); err != nil {
 		return err
 	}
@@ -367,8 +370,9 @@ func (ki *Initializer) prepareKindConfigFile(kindConfigPath string) error {
 		return err
 	}
 	kindConfigContent, err := tmplutil.SubsituteTemplate(constants.OpenYurtKindConfig, map[string]string{
-		"kind_node_image": ki.NodeImage,
-		"cluster_name":    ki.ClusterName,
+		"kind_node_image":     ki.NodeImage,
+		"cluster_name":        ki.ClusterName,
+		"disable_default_cni": fmt.Sprintf("%v", ki.DisableDefaultCNI),
 	})
 	if err != nil {
 		return err
@@ -407,10 +411,6 @@ func (ki *Initializer) configureAddons() error {
 		return err
 	}
 
-	if err := ki.ConfigureKubeProxyAddon(); err != nil {
-		return err
-	}
-
 	// re-construct kube-proxy pods
 	podList, err := ki.kubeClient.CoreV1().Pods("kube-system").List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
@@ -431,28 +431,33 @@ func (ki *Initializer) configureAddons() error {
 		}
 	}
 
-	// wait for coredns pods available
-	for {
-		select {
-		case <-time.After(10 * time.Second):
-			dnsDp, err := ki.kubeClient.AppsV1().Deployments("kube-system").Get(context.TODO(), "coredns", metav1.GetOptions{})
-			if err != nil {
-				return fmt.Errorf("failed to get coredns deployment when waiting for available, %v", err)
-			}
+	// If we disable default cni, nodes will not be ready and the coredns pod always be in pending.
+	// The health check for coreDNS should be done by someone who will install CNI.
+	if !ki.DisableDefaultCNI {
+		// wait for coredns pods available
+		for {
+			select {
+			case <-time.After(10 * time.Second):
+				dnsDp, err := ki.kubeClient.AppsV1().Deployments("kube-system").Get(context.TODO(), "coredns", metav1.GetOptions{})
+				if err != nil {
+					return fmt.Errorf("failed to get coredns deployment when waiting for available, %v", err)
+				}
 
-			if dnsDp.Status.ObservedGeneration < dnsDp.Generation {
-				klog.Infof("waiting for coredns generation(%d) to be observed. now observed generation is %d", dnsDp.Generation, dnsDp.Status.ObservedGeneration)
-				continue
-			}
+				if dnsDp.Status.ObservedGeneration < dnsDp.Generation {
+					klog.Infof("waiting for coredns generation(%d) to be observed. now observed generation is %d", dnsDp.Generation, dnsDp.Status.ObservedGeneration)
+					continue
+				}
 
-			if *dnsDp.Spec.Replicas != dnsDp.Status.AvailableReplicas {
-				klog.Infof("waiting for coredns replicas(%d) to be ready, now %d pods available", *dnsDp.Spec.Replicas, dnsDp.Status.AvailableReplicas)
-				continue
+				if *dnsDp.Spec.Replicas != dnsDp.Status.AvailableReplicas {
+					klog.Infof("waiting for coredns replicas(%d) to be ready, now %d pods available", *dnsDp.Spec.Replicas, dnsDp.Status.AvailableReplicas)
+					continue
+				}
+				klog.Info("coredns deployment configuration is completed")
+				return nil
 			}
-			klog.Info("coredns deployment configuration is completed")
-			return nil
 		}
 	}
+	return nil
 }
 
 func (ki *Initializer) configureCoreDnsAddon() error {
@@ -478,19 +483,6 @@ func (ki *Initializer) configureCoreDnsAddon() error {
 		}
 	}
 
-	// add annotation(openyurt.io/topologyKeys=kubernetes.io/hostname) for service kube-system/kube-dns in order to use the
-	// local coredns instance for resolving.
-	svc, err := ki.kubeClient.CoreV1().Services("kube-system").Get(context.TODO(), "kube-dns", metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	if svc != nil && len(svc.Annotations[servicetopology.AnnotationServiceTopologyKey]) == 0 {
-		svc.Annotations[servicetopology.AnnotationServiceTopologyKey] = servicetopology.AnnotationServiceTopologyValueNode
-		if _, err := ki.kubeClient.CoreV1().Services("kube-system").Update(context.TODO(), svc, metav1.UpdateOptions{}); err != nil {
-			return err
-		}
-	}
-
 	// kubectl patch deployment coredns -n kube-system  -p '{"spec": {"template": {"spec": {"volumes": [{"configMap":{"name":"yurt-tunnel-nodes"},"name": "edge"}]}}}}'
 	// kubectl patch deployment coredns -n kube-system   -p '{"spec": { "template": { "spec": { "containers": [{"name":"coredns","volumeMounts": [{"mountPath": "/etc/edge", "name": "edge", "readOnly": true }]}]}}}}'
 	dp, err := ki.kubeClient.AppsV1().Deployments("kube-system").Get(context.TODO(), "coredns", metav1.GetOptions{})
@@ -499,6 +491,20 @@ func (ki *Initializer) configureCoreDnsAddon() error {
 	}
 
 	if dp != nil {
+		replicasChanged := false
+		nodeList, err := ki.kubeClient.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			return err
+		} else if nodeList == nil {
+			return fmt.Errorf("failed to list nodes")
+		}
+
+		if dp.Spec.Replicas == nil || len(nodeList.Items) != int(*dp.Spec.Replicas) {
+			replicas := int32(len(nodeList.Items))
+			dp.Spec.Replicas = &replicas
+			replicasChanged = true
+		}
+
 		dp.Spec.Template.Spec.HostNetwork = true
 		hasEdgeVolume := false
 		for i := range dp.Spec.Template.Spec.Volumes {
@@ -535,6 +541,7 @@ func (ki *Initializer) configureCoreDnsAddon() error {
 				break
 			}
 		}
+
 		if !hasEdgeVolumeMount {
 			dp.Spec.Template.Spec.Containers[containerIndex].VolumeMounts = append(dp.Spec.Template.Spec.Containers[containerIndex].VolumeMounts,
 				v1.VolumeMount{
@@ -544,7 +551,7 @@ func (ki *Initializer) configureCoreDnsAddon() error {
 				})
 		}
 
-		if !hasEdgeVolume || !hasEdgeVolumeMount {
+		if replicasChanged || !hasEdgeVolume || !hasEdgeVolumeMount {
 			_, err = ki.kubeClient.AppsV1().Deployments("kube-system").Update(context.TODO(), dp, metav1.UpdateOptions{})
 			if err != nil {
 				return err
@@ -552,31 +559,33 @@ func (ki *Initializer) configureCoreDnsAddon() error {
 		}
 	}
 
-	return nil
-}
-
-func (ki *Initializer) ConfigureKubeProxyAddon() error {
-	// configure configmap kube-system/kube-proxy in order to make kube-proxy access kube-apiserver by going through yurthub
-	cm, err := ki.kubeClient.CoreV1().ConfigMaps("kube-system").Get(context.TODO(), "kube-proxy", metav1.GetOptions{})
+	// configure hostname service topology for kube-dns service
+	svc, err := ki.kubeClient.CoreV1().Services("kube-system").Get(context.TODO(), "kube-dns", metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
-	if cm != nil && strings.Contains(cm.Data["config.conf"], "kubeconfig") {
-		lines := strings.Split(cm.Data["config.conf"], "\n")
-		for i := range lines {
-			if strings.Contains(lines[i], "kubeconfig:") {
-				lines = append(lines[:i], lines[i+1:]...)
-				break
+
+	topologyChanged := false
+	if svc != nil {
+		if svc.Annotations == nil {
+			svc.Annotations = make(map[string]string)
+		}
+
+		if val, ok := svc.Annotations["openyurt.io/topologyKeys"]; ok && val == "kubernetes.io/hostname" {
+			// topology annotation does not need to change
+		} else {
+			svc.Annotations["openyurt.io/topologyKeys"] = "kubernetes.io/hostname"
+			topologyChanged = true
+		}
+
+		if topologyChanged {
+			_, err = ki.kubeClient.CoreV1().Services("kube-system").Update(context.TODO(), svc, metav1.UpdateOptions{})
+			if err != nil {
+				return err
 			}
 		}
-		cm.Data["config.conf"] = strings.Join(lines, "\n")
-
-		// update kube-proxy configmap
-		_, err = ki.kubeClient.CoreV1().ConfigMaps("kube-system").Update(context.TODO(), cm, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to configure kube-proxy configmap, %w", err)
-		}
 	}
+
 	return nil
 }
 
@@ -608,7 +617,7 @@ func (ki *Initializer) loadImagesToKindNodes(images, nodes []string) error {
 			// if image == "", it's the responsibility of kind to pull images from registry.
 			continue
 		}
-		if err := ki.operator.KindLoadDockerImage(ki.ClusterName, image, nodes); err != nil {
+		if err := ki.operator.KindLoadDockerImage(ki.out, ki.ClusterName, image, nodes); err != nil {
 			return err
 		}
 	}
@@ -638,9 +647,9 @@ func validateKubernetesVersion(ver string) error {
 }
 
 func validateOpenYurtVersion(ver string, ignoreError bool) error {
-	if !strutil.IsInStringLst(validOpenYurtVersions, ver) && !ignoreError {
+	if !strutil.IsInStringLst(AllValidOpenYurtVersions, ver) && !ignoreError {
 		return fmt.Errorf("%s is not a valid openyurt version, all valid versions are %s. If you know what you're doing, you can set --ignore-error",
-			ver, strings.Join(validOpenYurtVersions, ","))
+			ver, strings.Join(AllValidOpenYurtVersions, ","))
 	}
 	return nil
 }

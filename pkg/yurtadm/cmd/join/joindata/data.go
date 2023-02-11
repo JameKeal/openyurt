@@ -34,12 +34,14 @@ type YurtJoinData interface {
 	JoinToken() string
 	PauseImage() string
 	YurtHubImage() string
+	YurtHubServer() string
 	KubernetesVersion() string
 	TLSBootstrapCfg() *clientcmdapi.Config
 	BootstrapClient() *clientset.Clientset
 	NodeRegistration() *NodeRegistration
-	CaCertHashes() sets.String
+	CaCertHashes() []string
 	NodeLabels() map[string]string
 	IgnorePreflightErrors() sets.String
 	KubernetesResourceServer() string
+	ReuseCNIBin() bool
 }
