@@ -21,13 +21,13 @@ source "${YURT_ROOT}/hack/lib/init.sh"
 source "${YURT_ROOT}/hack/lib/build.sh"
 
 readonly YURT_ALL_TARGETS=(
-    yurtctl
     yurtadm
     yurt-node-servant
     yurthub
     yurt-controller-manager
     yurt-tunnel-server
     yurt-tunnel-agent
+    yurt-manager
 )
 
 # clean old binaries at GOOS and GOARCH

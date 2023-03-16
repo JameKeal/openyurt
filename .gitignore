@@ -1,4 +1,5 @@
 _output
+bin
 .idea
 .DS_Store
 gopath
@@ -9,3 +10,4 @@ vendor
 *.out
 logs
 test-prow
+e2e.test
