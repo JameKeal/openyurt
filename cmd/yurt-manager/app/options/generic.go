@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/openyurtio/openyurt/pkg/controller/apis/config"
+	"github.com/openyurtio/openyurt/pkg/features"
 )
 
 type GenericOptions struct {
@@ -36,6 +37,7 @@ func NewGenericOptions() *GenericOptions {
 			LeaderElectionNamespace: "kube-system",
 			RestConfigQPS:           30,
 			RestConfigBurst:         50,
+			WorkingNamespace:        "kube-system",
 		},
 	}
 }
@@ -61,9 +63,10 @@ func (o *GenericOptions) ApplyTo(cfg *config.GenericConfiguration) error {
 
 	cfg.HealthProbeAddr = o.HealthProbeAddr
 	cfg.EnableLeaderElection = o.EnableLeaderElection
-	cfg.LeaderElectionNamespace = o.LeaderElectionNamespace
+	cfg.LeaderElectionNamespace = o.WorkingNamespace
 	cfg.RestConfigQPS = o.RestConfigQPS
 	cfg.RestConfigBurst = o.RestConfigBurst
+	cfg.WorkingNamespace = o.WorkingNamespace
 
 	return nil
 }
@@ -78,8 +81,10 @@ func (o *GenericOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.MetricsAddr, "metrics-addr", o.MetricsAddr, "The address the metric endpoint binds to.")
 	fs.StringVar(&o.HealthProbeAddr, "health-probe-addr", o.HealthProbeAddr, "The address the healthz/readyz endpoint binds to.")
 	fs.BoolVar(&o.EnableLeaderElection, "enable-leader-election", o.EnableLeaderElection, "Whether you need to enable leader election.")
-	fs.StringVar(&o.LeaderElectionNamespace, "leader-election-namespace", o.LeaderElectionNamespace, "This determines the namespace in which the leader election configmap/leases will be created, it will use in-cluster namespace if empty.")
 
 	fs.IntVar(&o.RestConfigQPS, "rest-config-qps", o.RestConfigQPS, "rest-config-qps.")
 	fs.IntVar(&o.RestConfigBurst, "rest-config-burst", o.RestConfigBurst, "rest-config-burst.")
+	fs.StringVar(&o.WorkingNamespace, "working-namespace", o.WorkingNamespace, "The namespace where the yurt-manager is working.")
+
+	features.DefaultMutableFeatureGate.AddFlag(fs)
 }

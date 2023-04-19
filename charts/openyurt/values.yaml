@@ -1,6 +1,8 @@
-
 imagePullSecrets: []
 imagePullPolicy: IfNotPresent
+
+##  if unspecified, will use built-in variable `.Release.Namespace`.
+namespace: kube-system
 
 yurtControllerManager:
   replicaCount: 1
@@ -12,7 +14,8 @@ yurtControllerManager:
 poolCoordinator:
   apiserverSecurePort: 10270
   apiserverImage:
-    repository: registry.k8s.io/kube-apiserver
+    registry: registry.k8s.io
+    repository: kube-apiserver
     tag: v1.22.0
   apiserverResources:
     requests:
@@ -21,7 +24,8 @@ poolCoordinator:
   etcdPort: 12379
   etcdMetricPort: 12381
   etcdImage:
-    repository: registry.k8s.io/etcd
+    registry: registry.k8s.io
+    repository: etcd
     tag: 3.5.0-0
   etcdResources:
     limits:
@@ -57,12 +61,12 @@ yurtManager:
     requests:
       cpu: 100m
       memory: 256Mi
-  affinity: 
+  affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         nodeSelectorTerms:
-        - matchExpressions:
-          - key: openyurt.io/is-edge-worker
-            operator: In
-            values:
-            - "false"
+          - matchExpressions:
+              - key: openyurt.io/is-edge-worker
+                operator: In
+                values:
+                  - "false"

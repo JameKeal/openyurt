@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cert
+package poolcoordinatorcert
 
 import (
 	"context"
@@ -151,8 +151,10 @@ func loadCertAndKeyFromSecret(clientSet client.Interface, certConf CertConfig) (
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "couldn't parse the kubeconfig file in the %s secret", secretName)
 		}
-		authInfo := kubeConfig.AuthInfos[certConf.CommonName]
-
+		authInfo := kubeconfig.GetAuthInfoFromKubeConfig(kubeConfig)
+		if authInfo == nil {
+			return nil, nil, errors.Errorf("auth info is not found in secret(%s)", secretName)
+		}
 		certBytes = authInfo.ClientCertificateData
 		keyBytes = authInfo.ClientKeyData
 	} else {
@@ -200,7 +202,7 @@ func IsCertFromCA(cert *x509.Certificate, caCert *x509.Certificate) bool {
 	}
 
 	if _, err := cert.Verify(verifyOptions); err != nil {
-		klog.Infof("cert not authorized by current CA: %v", err)
+		klog.Infof(Format("cert not authorized by current CA: %v", err))
 		return false
 	}
 
@@ -293,7 +295,7 @@ func GetPrivateKeyFromTLSCert(cert *tls.Certificate) (keyPEM []byte, err error) 
 	return keyutil.MarshalPrivateKeyToPEM(cert.PrivateKey)
 }
 
-// get certificate & private key (in PEM format) from certmanager
+// GetCertAndKeyFromCertMgr will get certificate & private key (in PEM format) from certmanager
 func GetCertAndKeyFromCertMgr(certManager certificate.Manager, stopCh <-chan struct{}) (key []byte, cert []byte, err error) {
 	// waiting for the certificate is generated
 	certManager.Start()
@@ -301,10 +303,10 @@ func GetCertAndKeyFromCertMgr(certManager certificate.Manager, stopCh <-chan str
 	err = wait.PollUntil(5*time.Second, func() (bool, error) {
 		// keep polling until the certificate is signed
 		if certManager.Current() != nil {
-			klog.Infof("%s certificate signed successfully", ComponentName)
+			klog.Infof(Format("%s certificate signed successfully", ComponentName))
 			return true, nil
 		}
-		klog.Infof("waiting for the master to sign the %s certificate", ComponentName)
+		klog.Infof(Format("waiting for the master to sign the %s certificate", ComponentName))
 		return false, nil
 	}, stopCh)
 
@@ -327,7 +329,7 @@ func GetCertAndKeyFromCertMgr(certManager certificate.Manager, stopCh <-chan str
 	return
 }
 
-// write cert&key pair generated from certManager into a secret
+// WriteCertIntoSecret will write cert&key pair generated from certManager into a secret
 func WriteCertIntoSecret(clientSet client.Interface, certName, secretName string, certManager certificate.Manager, stopCh <-chan struct{}) error {
 
 	keyPEM, certPEM, err := GetCertAndKeyFromCertMgr(certManager, stopCh)
@@ -349,12 +351,12 @@ func WriteCertIntoSecret(clientSet client.Interface, certName, secretName string
 		return err
 	}
 
-	klog.Infof("successfully write %s cert/key pair into %s", certName, secretName)
+	klog.Infof(Format("successfully write %s cert/key pair into %s", certName, secretName))
 
 	return nil
 }
 
-// write cert&key into secret
+// WriteCertAndKeyIntoSecret is used for writing cert&key into secret
 // Notice: if cert OR key is nil, it will be ignored
 func WriteCertAndKeyIntoSecret(clientSet client.Interface, certName, secretName string, cert *x509.Certificate, key crypto.Signer) error {
 	// write certificate data into secret
@@ -385,7 +387,7 @@ func WriteCertAndKeyIntoSecret(clientSet client.Interface, certName, secretName 
 		}
 	}
 
-	klog.Infof("successfully write %s cert/key into %s", certName, secretName)
+	klog.Infof(Format("successfully write %s cert/key into %s", certName, secretName))
 
 	return nil
 }
@@ -400,7 +402,7 @@ func WriteKubeConfigIntoSecret(clientSet client.Interface, secretName, kubeConfi
 		return err
 	}
 
-	klog.Infof("successfully write kubeconfig into secret %s", secretName)
+	klog.Infof(Format("successfully write kubeconfig into secret %s", secretName))
 
 	return nil
 }
@@ -430,7 +432,7 @@ func WriteKeyPairIntoSecret(clientSet client.Interface, secretName, keyName stri
 		return errors.Wrapf(err, "fail to write %s.pub into secret %s", keyName, secretName)
 	}
 
-	klog.Infof("successfully write key pair into secret %s", secretName)
+	klog.Infof(Format("successfully write key pair into secret %s", secretName))
 
 	return nil
 }

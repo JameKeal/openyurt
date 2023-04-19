@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cert
+package poolcoordinatorcert
 
 import (
 	"crypto/x509"
@@ -229,7 +229,7 @@ contexts:
 - context:
     cluster: cluster
     user: openyurt:pool-coordinator:monitoring
-    name: openyurt:pool-coordinator:monitoring@cluster
+  name: openyurt:pool-coordinator:monitoring@cluster
 current-context: openyurt:pool-coordinator:monitoring@cluster
 kind: Config
 users:

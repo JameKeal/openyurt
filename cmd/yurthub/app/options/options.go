@@ -50,6 +50,7 @@ type YurtHubOptions struct {
 	YurtHubPort               int
 	YurtHubProxyPort          int
 	YurtHubProxySecurePort    int
+	YurtHubNamespace          string
 	GCFrequency               int
 	YurtHubCertOrganizations  []string
 	NodeName                  string
@@ -61,6 +62,7 @@ type YurtHubOptions struct {
 	HeartbeatIntervalSeconds  int
 	MaxRequestInFlight        int
 	JoinToken                 string
+	BootstrapFile             string
 	RootDir                   string
 	Version                   bool
 	EnableProfiling           bool
@@ -94,6 +96,7 @@ func NewYurtHubOptions() *YurtHubOptions {
 		YurtHubProxyPort:          util.YurtHubProxyPort,
 		YurtHubPort:               util.YurtHubPort,
 		YurtHubProxySecurePort:    util.YurtHubProxySecurePort,
+		YurtHubNamespace:          util.YurtHubNamespace,
 		GCFrequency:               120,
 		YurtHubCertOrganizations:  make([]string, 0),
 		LBMode:                    "rr",
@@ -143,8 +146,8 @@ func (options *YurtHubOptions) Validate() error {
 		return fmt.Errorf("server-address is empty")
 	}
 
-	if len(options.JoinToken) == 0 {
-		return fmt.Errorf("bootstrap token is empty")
+	if len(options.JoinToken) == 0 && len(options.BootstrapFile) == 0 {
+		return fmt.Errorf("bootstrap token and bootstrap file are empty, one of them must be set")
 	}
 
 	if !util.IsSupportedLBMode(options.LBMode) {
@@ -173,6 +176,7 @@ func (o *YurtHubOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.YurtHubProxyHost, "bind-proxy-address", o.YurtHubProxyHost, "the IP address of YurtHub Proxy Server")
 	fs.IntVar(&o.YurtHubProxyPort, "proxy-port", o.YurtHubProxyPort, "the port on which to proxy HTTP requests to kube-apiserver")
 	fs.IntVar(&o.YurtHubProxySecurePort, "proxy-secure-port", o.YurtHubProxySecurePort, "the port on which to proxy HTTPS requests to kube-apiserver")
+	fs.StringVar(&o.YurtHubNamespace, "namespace", o.YurtHubNamespace, "the namespace of YurtHub Server")
 	fs.StringVar(&o.ServerAddr, "server-addr", o.ServerAddr, "the address of Kubernetes kube-apiserver,the format is: \"server1,server2,...\"")
 	fs.StringSliceVar(&o.YurtHubCertOrganizations, "hub-cert-organizations", o.YurtHubCertOrganizations, "Organizations that will be added into hub's apiserver client certificate, the format is: certOrg1,certOrg2,...")
 	fs.IntVar(&o.GCFrequency, "gc-frequency", o.GCFrequency, "the frequency to gc cache in storage(unit: minute).")
@@ -183,7 +187,9 @@ func (o *YurtHubOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&o.HeartbeatTimeoutSeconds, "heartbeat-timeout-seconds", o.HeartbeatTimeoutSeconds, " number of seconds after which the heartbeat times out.")
 	fs.IntVar(&o.HeartbeatIntervalSeconds, "heartbeat-interval-seconds", o.HeartbeatIntervalSeconds, " number of seconds for omitting one time heartbeat to remote server.")
 	fs.IntVar(&o.MaxRequestInFlight, "max-requests-in-flight", o.MaxRequestInFlight, "the maximum number of parallel requests.")
-	fs.StringVar(&o.JoinToken, "join-token", o.JoinToken, "the Join token for bootstrapping hub agent when --cert-mgr-mode=hubself.")
+	fs.StringVar(&o.JoinToken, "join-token", o.JoinToken, "the Join token for bootstrapping hub agent.")
+	fs.MarkDeprecated("join-token", "It is planned to be removed from OpenYurt in the version v1.5. Please use --bootstrap-file to bootstrap hub agent.")
+	fs.StringVar(&o.BootstrapFile, "bootstrap-file", o.BootstrapFile, "the bootstrap file for bootstrapping hub agent.")
 	fs.StringVar(&o.RootDir, "root-dir", o.RootDir, "directory path for managing hub agent files(pki, cache etc).")
 	fs.BoolVar(&o.Version, "version", o.Version, "print the version information.")
 	fs.BoolVar(&o.EnableProfiling, "profiling", o.EnableProfiling, "enable profiling via web interface host:port/debug/pprof/")
