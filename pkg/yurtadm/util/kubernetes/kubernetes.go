@@ -488,3 +488,22 @@ func CheckKubeletStatus() error {
 	}
 	return nil
 }
+
+// GetYurthubTemplateFromStaticPod get yurthub template from static pod
+func GetYurthubTemplateFromStaticPod(client kubernetes.Interface, namespace, name string) (string, string, error) {
+	configMap, err := apiclient.GetConfigMapWithRetry(
+		client,
+		namespace,
+		name)
+	if err != nil {
+		return "", "", pkgerrors.Wrap(err, "failed to get configmap of yurthub yurtstaticset")
+	}
+
+	if len(configMap.Data) == 1 {
+		for manifest, data := range configMap.Data {
+			return manifest, data, nil
+		}
+	}
+
+	return "", "", fmt.Errorf("invalid manifest in configmap %s", name)
+}

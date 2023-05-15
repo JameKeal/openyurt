@@ -205,14 +205,14 @@ func SetDefaults_ContainerPort(obj *corev1.ContainerPort) {
 	}
 }
 
-// SetDefaultsStaticPod set default values for StaticPod.
-func SetDefaultsStaticPod(obj *StaticPod) {
-	// Set default upgrade strategy to "auto" with max-unavailable to "10%"
+// SetDefaultsYurtStaticSet sets default values for YurtStaticSet.
+func SetDefaultsYurtStaticSet(obj *YurtStaticSet) {
+	// Set default upgrade strategy to "AdvancedRollingUpdate" with max-unavailable to "10%"
 	strategy := &obj.Spec.UpgradeStrategy
 	if strategy.Type == "" {
-		strategy.Type = AutoStaticPodUpgradeStrategyType
+		strategy.Type = AdvancedRollingUpdateUpgradeStrategyType
 	}
-	if strategy.Type == AutoStaticPodUpgradeStrategyType && strategy.MaxUnavailable == nil {
+	if strategy.Type == AdvancedRollingUpdateUpgradeStrategyType && strategy.MaxUnavailable == nil {
 		v := intstr.FromString("10%")
 		strategy.MaxUnavailable = &v
 	}
@@ -221,5 +221,32 @@ func SetDefaultsStaticPod(obj *StaticPod) {
 	if obj.Spec.RevisionHistoryLimit == nil {
 		obj.Spec.RevisionHistoryLimit = new(int32)
 		*obj.Spec.RevisionHistoryLimit = 10
+	}
+
+	podSpec := &obj.Spec.Template.Spec
+	if podSpec != nil {
+		SetDefaultPodSpec(podSpec)
+	}
+}
+
+// SetDefaultsYurtAppDaemon set default values for YurtAppDaemon.
+func SetDefaultsYurtAppDaemon(obj *YurtAppDaemon) {
+
+	if obj.Spec.RevisionHistoryLimit == nil {
+		obj.Spec.RevisionHistoryLimit = utilpointer.Int32Ptr(10)
+	}
+
+	if obj.Spec.WorkloadTemplate.StatefulSetTemplate != nil {
+		SetDefaultPodSpec(&obj.Spec.WorkloadTemplate.StatefulSetTemplate.Spec.Template.Spec)
+		for i := range obj.Spec.WorkloadTemplate.StatefulSetTemplate.Spec.VolumeClaimTemplates {
+			a := &obj.Spec.WorkloadTemplate.StatefulSetTemplate.Spec.VolumeClaimTemplates[i]
+			v1.SetDefaults_PersistentVolumeClaim(a)
+			v1.SetDefaults_ResourceList(&a.Spec.Resources.Limits)
+			v1.SetDefaults_ResourceList(&a.Spec.Resources.Requests)
+			v1.SetDefaults_ResourceList(&a.Status.Capacity)
+		}
+	}
+	if obj.Spec.WorkloadTemplate.DeploymentTemplate != nil {
+		SetDefaultPodSpec(&obj.Spec.WorkloadTemplate.DeploymentTemplate.Spec.Template.Spec)
 	}
 }

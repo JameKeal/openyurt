@@ -17,26 +17,29 @@ limitations under the License.
 package constants
 
 const (
-	Hostname                 = "/etc/hostname"
-	SysctlK8sConfig          = "/etc/sysctl.d/k8s.conf"
-	StaticPodPath            = "/etc/kubernetes/manifests"
-	KubeletConfigureDir      = "/etc/kubernetes"
-	KubeletWorkdir           = "/var/lib/kubelet"
-	YurtHubWorkdir           = "/var/lib/yurthub"
-	YurtHubBootstrapConfig   = "/var/lib/yurthub/bootstrap-hub.conf"
-	OpenyurtDir              = "/var/lib/openyurt"
-	YurttunnelAgentWorkdir   = "/var/lib/yurttunnel-agent"
-	YurttunnelServerWorkdir  = "/var/lib/yurttunnel-server"
-	KubeCniDir               = "/opt/cni/bin"
-	KubeCniVersion           = "v0.8.0"
-	KubeletServiceFilepath   = "/etc/systemd/system/kubelet.service"
-	KubeletServiceConfPath   = "/etc/systemd/system/kubelet.service.d/10-kubeadm.conf"
-	KubeletSvcPath           = "/usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf"
-	YurthubStaticPodFileName = "yurthub.yaml"
-	PauseImagePath           = "registry.cn-hangzhou.aliyuncs.com/google_containers/pause:3.2"
-	DefaultCertificatesDir   = "/etc/kubernetes/pki"
-	DefaultDockerCRISocket   = "/var/run/dockershim.sock"
-	YurthubYamlName          = "yurt-hub.yaml"
+	Hostname                      = "/etc/hostname"
+	SysctlK8sConfig               = "/etc/sysctl.d/k8s.conf"
+	StaticPodPath                 = "/etc/kubernetes/manifests"
+	KubeletConfigureDir           = "/etc/kubernetes"
+	KubeletWorkdir                = "/var/lib/kubelet"
+	YurtHubWorkdir                = "/var/lib/yurthub"
+	YurtHubBootstrapConfig        = "/var/lib/yurthub/bootstrap-hub.conf"
+	OpenyurtDir                   = "/var/lib/openyurt"
+	YurttunnelAgentWorkdir        = "/var/lib/yurttunnel-agent"
+	YurttunnelServerWorkdir       = "/var/lib/yurttunnel-server"
+	KubeCniDir                    = "/opt/cni/bin"
+	KubeCniVersion                = "v0.8.0"
+	KubeletServiceFilepath        = "/etc/systemd/system/kubelet.service"
+	KubeletServiceConfPath        = "/etc/systemd/system/kubelet.service.d/10-kubeadm.conf"
+	KubeletSvcPath                = "/usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf"
+	PauseImagePath                = "registry.cn-hangzhou.aliyuncs.com/google_containers/pause:3.2"
+	DefaultCertificatesDir        = "/etc/kubernetes/pki"
+	DefaultDockerCRISocket        = "/var/run/dockershim.sock"
+	YurthubYamlName               = "yurthub.yaml"
+	YurthubStaticPodManifest      = "yurthub"
+	YurthubNamespace              = "kube-system"
+	YurthubYurtStaticSetName      = "yurt-hub"
+	YurthubCloudYurtStaticSetName = "yurt-hub-cloud"
 	// ManifestsSubDirName defines directory name to store manifests
 	ManifestsSubDirName = "manifests"
 	// KubeletKubeConfigFileName defines the file name for the kubeconfig that the control-plane kubelet will use for talking
@@ -93,6 +96,8 @@ const (
 	TokenDiscoveryCAHash = "discovery-token-ca-cert-hash"
 	// TokenDiscoverySkipCAHash flag instruct kubeadm to skip CA hash verification (for token-based discovery)
 	TokenDiscoverySkipCAHash = "discovery-token-unsafe-skip-ca-verification"
+	// Namespace flag sets the namespace of yurthub staticpod manifest.
+	Namespace = "namespace"
 	// YurtHubImage flag sets the yurthub image for worker node.
 	YurtHubImage = "yurthub-image"
 	// YurtHubServerAddr flag set the address of yurthub server (not proxy server!)
@@ -106,8 +111,8 @@ const (
 	ServerHealthzURLPath         = "/v1/healthz"
 	ServerReadyzURLPath          = "/v1/readyz"
 	DefaultOpenYurtImageRegistry = "registry.cn-hangzhou.aliyuncs.com/openyurt"
-	DefaultOpenYurtVersion       = "latest"
 	Yurthub                      = "yurthub"
+	DefaultOpenYurtVersion       = "latest"
 	DefaultYurtHubServerAddr     = "127.0.0.1"
 	DirMode                      = 0755
 	KubeletServiceContent        = `
@@ -201,10 +206,6 @@ spec:
     hostPath:
       path: /etc/kubernetes
       type: Directory
-  - name: pem-dir
-    hostPath:
-      path: /var/lib/kubelet/pki
-      type: Directory
   containers:
   - name: yurt-hub
     image: {{.image}}
@@ -214,16 +215,15 @@ spec:
       mountPath: /var/lib/yurthub
     - name: kubernetes
       mountPath: /etc/kubernetes
-    - name: pem-dir
-      mountPath: /var/lib/kubelet/pki
     command:
     - yurthub
     - --v=2
-    - --bind-address={{.yurthubServerAddr}}
+    - --bind-address={{.yurthubBindingAddr}}
     - --server-addr={{.kubernetesServerAddr}}
     - --node-name=$(NODE_NAME)
-    - --bootstrap-file={{.bootstrapFile}}
+    - --bootstrap-file=/var/lib/yurthub/bootstrap-hub.conf
     - --working-mode={{.workingMode}}
+    - --namespace={{.namespace}}
       {{if .enableDummyIf }}
     - --enable-dummy-if={{.enableDummyIf}}
       {{end}}
@@ -235,7 +235,7 @@ spec:
       {{end}}
     livenessProbe:
       httpGet:
-        host: {{.yurthubServerAddr}}
+        host: {{.yurthubBindingAddr}}
         path: /v1/healthz
         port: 10267
       initialDelaySeconds: 300

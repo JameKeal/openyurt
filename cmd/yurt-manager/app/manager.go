@@ -39,6 +39,7 @@ import (
 	"github.com/openyurtio/openyurt/pkg/apis"
 	extclient "github.com/openyurtio/openyurt/pkg/client"
 	"github.com/openyurtio/openyurt/pkg/controller"
+	"github.com/openyurtio/openyurt/pkg/profile"
 	"github.com/openyurtio/openyurt/pkg/projectinfo"
 	"github.com/openyurtio/openyurt/pkg/webhook"
 	"github.com/openyurtio/openyurt/pkg/webhook/util"
@@ -186,30 +187,29 @@ func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 	}
 
 	setupLog.Info("setup webhook")
-	if err = webhook.SetupWithManager(mgr); err != nil {
+	if err = webhook.SetupWithManager(c, mgr); err != nil {
 		setupLog.Error(err, "unable to setup webhook")
 		os.Exit(1)
 	}
 
 	// +kubebuilder:scaffold:builder
 	setupLog.Info("initialize webhook")
-	if err := webhook.Initialize(ctx, cfg, c); err != nil {
+	if err := webhook.Initialize(ctx, c); err != nil {
 		setupLog.Error(err, "unable to initialize webhook")
 		os.Exit(1)
 	}
 
-	if err := mgr.AddReadyzCheck("webhook-ready", webhook.Checker); err != nil {
+	if err := mgr.AddReadyzCheck("webhook-ready", mgr.GetWebhookServer().StartedChecker()); err != nil {
 		setupLog.Error(err, "unable to add readyz check")
 		os.Exit(1)
 	}
 
-	go func() {
-		setupLog.Info("wait webhook ready")
-		if err = webhook.WaitReady(); err != nil {
-			setupLog.Error(err, "unable to wait webhook ready")
+	for path, handler := range profile.GetPprofHandlers() {
+		if err := mgr.AddMetricsExtraHandler(path, handler); err != nil {
+			setupLog.Error(err, "unable to add pprof handler")
 			os.Exit(1)
 		}
-	}()
+	}
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {

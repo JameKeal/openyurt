@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 
+	"github.com/openyurtio/openyurt/pkg/node-servant/static-pod-upgrade/util"
 	kubeconfigutil "github.com/openyurtio/openyurt/pkg/util/kubeconfig"
 	"github.com/openyurtio/openyurt/pkg/util/templates"
 	"github.com/openyurtio/openyurt/pkg/util/token"
@@ -60,20 +61,22 @@ func AddYurthubStaticYaml(data joindata.YurtJoinData, podManifestPath string) er
 	kubernetesServerAddrs := strings.Join(serverAddrs, ",")
 
 	ctx := map[string]string{
+		"yurthubBindingAddr":   data.YurtHubServer(),
 		"kubernetesServerAddr": kubernetesServerAddrs,
-		"image":                data.YurtHubImage(),
-		"bootstrapFile":        constants.YurtHubBootstrapConfig,
 		"workingMode":          data.NodeRegistration().WorkingMode,
 		"organizations":        data.NodeRegistration().Organizations,
-		"yurthubServerAddr":    data.YurtHubServer(),
+		"namespace":            data.Namespace(),
+		"image":                data.YurtHubImage(),
 	}
 
-	yurthubTemplate, err := templates.SubsituteTemplate(constants.YurthubTemplate, ctx)
+	yurthubTemplate, err := templates.SubsituteTemplate(data.YurtHubTemplate(), ctx)
 	if err != nil {
 		return err
 	}
+	yurthubManifestFile := filepath.Join(podManifestPath, util.WithYamlSuffix(data.YurtHubManifest()))
+	klog.Infof("yurthub template: %s\n%s", yurthubManifestFile, yurthubTemplate)
 
-	if err := os.WriteFile(filepath.Join(podManifestPath, constants.YurthubStaticPodFileName), []byte(yurthubTemplate), 0600); err != nil {
+	if err := os.WriteFile(yurthubManifestFile, []byte(yurthubTemplate), 0600); err != nil {
 		return err
 	}
 	klog.Info("[join-node] Add hub agent static yaml is ok")

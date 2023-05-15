@@ -17,11 +17,15 @@ limitations under the License.
 package options
 
 import (
+	"fmt"
+
 	"github.com/spf13/pflag"
 
 	"github.com/openyurtio/openyurt/pkg/controller/apis/config"
 	"github.com/openyurtio/openyurt/pkg/features"
 )
+
+const enableAll = "*"
 
 type GenericOptions struct {
 	*config.GenericConfiguration
@@ -31,13 +35,16 @@ func NewGenericOptions() *GenericOptions {
 	return &GenericOptions{
 		&config.GenericConfiguration{
 			Version:                 false,
-			MetricsAddr:             ":10250",
-			HealthProbeAddr:         ":8000",
+			MetricsAddr:             ":10271",
+			HealthProbeAddr:         ":10272",
+			WebhookPort:             10273,
 			EnableLeaderElection:    true,
 			LeaderElectionNamespace: "kube-system",
 			RestConfigQPS:           30,
 			RestConfigBurst:         50,
 			WorkingNamespace:        "kube-system",
+			Controllers:             []string{enableAll},
+			DisabledWebhooks:        []string{},
 		},
 	}
 }
@@ -49,6 +56,9 @@ func (o *GenericOptions) Validate() []error {
 	}
 
 	errs := []error{}
+	if o.WebhookPort == 0 {
+		errs = append(errs, fmt.Errorf("webhook server can not be switched off with 0"))
+	}
 	return errs
 }
 
@@ -60,13 +70,15 @@ func (o *GenericOptions) ApplyTo(cfg *config.GenericConfiguration) error {
 
 	cfg.Version = o.Version
 	cfg.MetricsAddr = o.MetricsAddr
-
 	cfg.HealthProbeAddr = o.HealthProbeAddr
+	cfg.WebhookPort = o.WebhookPort
 	cfg.EnableLeaderElection = o.EnableLeaderElection
 	cfg.LeaderElectionNamespace = o.WorkingNamespace
 	cfg.RestConfigQPS = o.RestConfigQPS
 	cfg.RestConfigBurst = o.RestConfigBurst
 	cfg.WorkingNamespace = o.WorkingNamespace
+	cfg.Controllers = o.Controllers
+	cfg.DisabledWebhooks = o.DisabledWebhooks
 
 	return nil
 }
@@ -80,11 +92,16 @@ func (o *GenericOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&o.Version, "version", o.Version, "Print the version information, and then exit")
 	fs.StringVar(&o.MetricsAddr, "metrics-addr", o.MetricsAddr, "The address the metric endpoint binds to.")
 	fs.StringVar(&o.HealthProbeAddr, "health-probe-addr", o.HealthProbeAddr, "The address the healthz/readyz endpoint binds to.")
+	fs.IntVar(&o.WebhookPort, "webhook-port", o.WebhookPort, "The port on which to serve HTTPS for webhook server. It can't be switched off with 0")
 	fs.BoolVar(&o.EnableLeaderElection, "enable-leader-election", o.EnableLeaderElection, "Whether you need to enable leader election.")
 
 	fs.IntVar(&o.RestConfigQPS, "rest-config-qps", o.RestConfigQPS, "rest-config-qps.")
 	fs.IntVar(&o.RestConfigBurst, "rest-config-burst", o.RestConfigBurst, "rest-config-burst.")
 	fs.StringVar(&o.WorkingNamespace, "working-namespace", o.WorkingNamespace, "The namespace where the yurt-manager is working.")
+	fs.StringSliceVar(&o.Controllers, "controllers", o.Controllers, "A list of controllers to enable. "+
+		"'*' enables all on-by-default controllers, 'foo' enables the controller named 'foo', '-foo' disables the controller named 'foo'.")
+	fs.StringSliceVar(&o.DisabledWebhooks, "disable-independent-webhooks", o.DisabledWebhooks, "A list of webhooks to disable. "+
+		"'*' disables all webhooks, 'foo' disables the webhook named 'foo'.")
 
 	features.DefaultMutableFeatureGate.AddFlag(fs)
 }

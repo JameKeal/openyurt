@@ -30,6 +30,7 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/klog/v2"
 
+	"github.com/openyurtio/openyurt/pkg/controller/yurtstaticset/util"
 	kubeconfigutil "github.com/openyurtio/openyurt/pkg/util/kubeconfig"
 	"github.com/openyurtio/openyurt/pkg/yurtadm/cmd/join/joindata"
 	yurtphases "github.com/openyurtio/openyurt/pkg/yurtadm/cmd/join/phases"
@@ -46,6 +47,7 @@ type joinOptions struct {
 	organizations            string
 	pauseImage               string
 	yurthubImage             string
+	namespace                string
 	caCertHashes             []string
 	unsafeSkipCAVerification bool
 	ignorePreflightErrors    []string
@@ -62,6 +64,7 @@ func newJoinOptions() *joinOptions {
 		criSocket:                yurtconstants.DefaultDockerCRISocket,
 		pauseImage:               yurtconstants.PauseImagePath,
 		yurthubImage:             fmt.Sprintf("%s/%s:%s", yurtconstants.DefaultOpenYurtImageRegistry, yurtconstants.Yurthub, yurtconstants.DefaultOpenYurtVersion),
+		namespace:                yurtconstants.YurthubNamespace,
 		caCertHashes:             make([]string, 0),
 		unsafeSkipCAVerification: false,
 		ignorePreflightErrors:    make([]string, 0),
@@ -117,6 +120,10 @@ func addJoinConfigFlags(flagSet *flag.FlagSet, joinOptions *joinOptions) {
 	flagSet.StringVar(
 		&joinOptions.nodeName, yurtconstants.NodeName, joinOptions.nodeName,
 		`Specify the node name. if not specified, hostname will be used.`,
+	)
+	flagSet.StringVar(
+		&joinOptions.namespace, yurtconstants.Namespace, joinOptions.namespace,
+		`Specify the namespace of the yurthub staticpod configmap, if not specified, the namespace will be default.`,
 	)
 	flagSet.StringVar(
 		&joinOptions.criSocket, yurtconstants.NodeCRISocket, joinOptions.criSocket,
@@ -202,12 +209,15 @@ type joinData struct {
 	organizations            string
 	pauseImage               string
 	yurthubImage             string
+	yurthubTemplate          string
+	yurthubManifest          string
 	kubernetesVersion        string
 	caCertHashes             []string
 	nodeLabels               map[string]string
 	kubernetesResourceServer string
 	yurthubServer            string
 	reuseCNIBin              bool
+	namespace                string
 }
 
 // newJoinData returns a new joinData struct to be used for the execution of the kubeadm join workflow.
@@ -272,6 +282,7 @@ func newJoinData(args []string, opt *joinOptions) (*joinData, error) {
 		},
 		kubernetesResourceServer: opt.kubernetesResourceServer,
 		reuseCNIBin:              opt.reuseCNIBin,
+		namespace:                opt.namespace,
 	}
 
 	// parse node labels
@@ -311,6 +322,22 @@ func newJoinData(args []string, opt *joinOptions) (*joinData, error) {
 	data.kubernetesVersion = k8sVersion
 	klog.Infof("node join data info: %#+v", *data)
 
+	// get the yurthub template from the staticpod cr
+	yurthubYurtStaticSetName := yurtconstants.YurthubYurtStaticSetName
+	if data.NodeRegistration().WorkingMode == "cloud" {
+		yurthubYurtStaticSetName = yurtconstants.YurthubCloudYurtStaticSetName
+	}
+
+	yurthubManifest, yurthubTemplate, err := yurtadmutil.GetYurthubTemplateFromStaticPod(client, opt.namespace, util.WithConfigMapPrefix(yurthubYurtStaticSetName))
+	if err != nil {
+		klog.Errorf("hard-code yurthub manifest will be used, because failed to get yurthub template from kube-apiserver, %v", err)
+		yurthubManifest = yurtconstants.YurthubStaticPodManifest
+		yurthubTemplate = yurtconstants.YurthubTemplate
+
+	}
+	data.yurthubTemplate = yurthubTemplate
+	data.yurthubManifest = yurthubManifest
+
 	return data, nil
 }
 
@@ -337,6 +364,15 @@ func (j *joinData) YurtHubImage() string {
 // YurtHubServer returns the YurtHub server addr.
 func (j *joinData) YurtHubServer() string {
 	return j.yurthubServer
+}
+
+// YurtHubTemplate returns the YurtHub template.
+func (j *joinData) YurtHubTemplate() string {
+	return j.yurthubTemplate
+}
+
+func (j *joinData) YurtHubManifest() string {
+	return j.yurthubManifest
 }
 
 // KubernetesVersion returns the kubernetes version.
@@ -377,4 +413,8 @@ func (j *joinData) KubernetesResourceServer() string {
 
 func (j *joinData) ReuseCNIBin() bool {
 	return j.reuseCNIBin
+}
+
+func (j *joinData) Namespace() string {
+	return j.namespace
 }
