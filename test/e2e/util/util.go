@@ -35,6 +35,8 @@ import (
 
 	appsv1alpha1 "github.com/openyurtio/openyurt/pkg/apis/apps/v1alpha1"
 	appsv1beta1 "github.com/openyurtio/openyurt/pkg/apis/apps/v1beta1"
+	iotv1alpha2 "github.com/openyurtio/openyurt/pkg/apis/iot/v1alpha2"
+	iotv1beta1 "github.com/openyurtio/openyurt/pkg/apis/iot/v1beta1"
 	"github.com/openyurtio/openyurt/test/e2e/yurtconfig"
 )
 
@@ -46,6 +48,8 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(appsv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(appsv1beta1.AddToScheme(scheme))
+	utilruntime.Must(iotv1alpha2.AddToScheme(scheme))
+	utilruntime.Must(iotv1beta1.AddToScheme(scheme))
 }
 
 const (
@@ -87,8 +91,8 @@ func WaitForNamespacesDeleted(c clientset.Interface, namespaces []string, timeou
 		nsMap[ns] = true
 	}
 	// Now POLL until all namespaces have been eradicated.
-	return wait.Poll(2*time.Second, timeout,
-		func() (bool, error) {
+	return wait.PollUntilContextTimeout(context.Background(), 2*time.Second, timeout, true,
+		func(ctx context.Context) (bool, error) {
 			nsList, err := c.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
 			if err != nil {
 				return false, err

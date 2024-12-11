@@ -28,12 +28,12 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
-	"github.com/openyurtio/openyurt/pkg/controller/daemonpodupdater"
 	"github.com/openyurtio/openyurt/pkg/yurthub/cachemanager"
 	"github.com/openyurtio/openyurt/pkg/yurthub/kubernetes/rest"
 	upgrade "github.com/openyurtio/openyurt/pkg/yurthub/otaupdate/upgrader"
 	"github.com/openyurtio/openyurt/pkg/yurthub/otaupdate/util"
 	"github.com/openyurtio/openyurt/pkg/yurthub/storage"
+	"github.com/openyurtio/openyurt/pkg/yurtmanager/controller/daemonpodupdater"
 )
 
 const (
@@ -89,7 +89,7 @@ func GetPods(store cachemanager.StorageWrapper) http.Handler {
 	})
 }
 
-// UpdatePod update a specifc pod(namespace/podname) to the latest version
+// UpdatePod update a specific pod(namespace/podname) to the latest version
 func UpdatePod(clientset kubernetes.Interface, nodeName string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		params := mux.Vars(r)
@@ -148,7 +148,7 @@ func UpdatePod(clientset kubernetes.Interface, nodeName string) http.Handler {
 func preCheck(clientset kubernetes.Interface, namespace, podName, nodeName string) (*corev1.Pod, bool) {
 	pod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{})
 	if err != nil {
-		klog.Errorf("Get pod %v/%v failed, %v", namespace, podName, err)
+		klog.Errorf("couldn't get pod %s/%s, %v", namespace, podName, err)
 		return nil, false
 	}
 

@@ -17,10 +17,12 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	v1 "k8s.io/kubernetes/pkg/apis/core/v1"
-	utilpointer "k8s.io/utils/pointer"
+	utilpointer "k8s.io/utils/ptr"
 )
 
 // SetDefaultsNodePool set default values for NodePool.
@@ -36,7 +38,7 @@ func SetDefaultsNodePool(obj *NodePool) {
 func SetDefaultsYurtAppSet(obj *YurtAppSet) {
 
 	if obj.Spec.RevisionHistoryLimit == nil {
-		obj.Spec.RevisionHistoryLimit = utilpointer.Int32Ptr(10)
+		obj.Spec.RevisionHistoryLimit = utilpointer.To[int32](10)
 	}
 
 	if obj.Spec.WorkloadTemplate.StatefulSetTemplate != nil {
@@ -127,14 +129,14 @@ func SetDefaultPodSpec(in *corev1.PodSpec) {
 		v1.SetDefaults_ResourceList(&a.Resources.Requests)
 		if a.LivenessProbe != nil {
 			v1.SetDefaults_Probe(a.LivenessProbe)
-			if a.LivenessProbe.Handler.HTTPGet != nil {
-				v1.SetDefaults_HTTPGetAction(a.LivenessProbe.Handler.HTTPGet)
+			if a.LivenessProbe.ProbeHandler.HTTPGet != nil {
+				v1.SetDefaults_HTTPGetAction(a.LivenessProbe.ProbeHandler.HTTPGet)
 			}
 		}
 		if a.ReadinessProbe != nil {
 			v1.SetDefaults_Probe(a.ReadinessProbe)
-			if a.ReadinessProbe.Handler.HTTPGet != nil {
-				v1.SetDefaults_HTTPGetAction(a.ReadinessProbe.Handler.HTTPGet)
+			if a.ReadinessProbe.ProbeHandler.HTTPGet != nil {
+				v1.SetDefaults_HTTPGetAction(a.ReadinessProbe.ProbeHandler.HTTPGet)
 			}
 		}
 		if a.Lifecycle != nil {
@@ -173,14 +175,14 @@ func SetDefaultPodSpec(in *corev1.PodSpec) {
 		v1.SetDefaults_ResourceList(&a.Resources.Requests)
 		if a.LivenessProbe != nil {
 			v1.SetDefaults_Probe(a.LivenessProbe)
-			if a.LivenessProbe.Handler.HTTPGet != nil {
-				v1.SetDefaults_HTTPGetAction(a.LivenessProbe.Handler.HTTPGet)
+			if a.LivenessProbe.ProbeHandler.HTTPGet != nil {
+				v1.SetDefaults_HTTPGetAction(a.LivenessProbe.ProbeHandler.HTTPGet)
 			}
 		}
 		if a.ReadinessProbe != nil {
 			v1.SetDefaults_Probe(a.ReadinessProbe)
-			if a.ReadinessProbe.Handler.HTTPGet != nil {
-				v1.SetDefaults_HTTPGetAction(a.ReadinessProbe.Handler.HTTPGet)
+			if a.ReadinessProbe.ProbeHandler.HTTPGet != nil {
+				v1.SetDefaults_HTTPGetAction(a.ReadinessProbe.ProbeHandler.HTTPGet)
 			}
 		}
 		if a.Lifecycle != nil {
@@ -212,7 +214,7 @@ func SetDefaultsYurtStaticSet(obj *YurtStaticSet) {
 	if strategy.Type == "" {
 		strategy.Type = AdvancedRollingUpdateUpgradeStrategyType
 	}
-	if strategy.Type == AdvancedRollingUpdateUpgradeStrategyType && strategy.MaxUnavailable == nil {
+	if strings.EqualFold(string(strategy.Type), string(AdvancedRollingUpdateUpgradeStrategyType)) && strategy.MaxUnavailable == nil {
 		v := intstr.FromString("10%")
 		strategy.MaxUnavailable = &v
 	}
@@ -227,13 +229,17 @@ func SetDefaultsYurtStaticSet(obj *YurtStaticSet) {
 	if podSpec != nil {
 		SetDefaultPodSpec(podSpec)
 	}
+
+	// use YurtStaticSet name and namespace to replace name and namespace in template metadata
+	obj.Spec.Template.Name = obj.Name
+	obj.Spec.Template.Namespace = obj.Namespace
 }
 
 // SetDefaultsYurtAppDaemon set default values for YurtAppDaemon.
 func SetDefaultsYurtAppDaemon(obj *YurtAppDaemon) {
 
 	if obj.Spec.RevisionHistoryLimit == nil {
-		obj.Spec.RevisionHistoryLimit = utilpointer.Int32Ptr(10)
+		obj.Spec.RevisionHistoryLimit = utilpointer.To[int32](10)
 	}
 
 	if obj.Spec.WorkloadTemplate.StatefulSetTemplate != nil {
@@ -249,4 +255,10 @@ func SetDefaultsYurtAppDaemon(obj *YurtAppDaemon) {
 	if obj.Spec.WorkloadTemplate.DeploymentTemplate != nil {
 		SetDefaultPodSpec(&obj.Spec.WorkloadTemplate.DeploymentTemplate.Spec.Template.Spec)
 	}
+}
+
+// SetDefaultsNodeBucket set default values for NodeBucket.
+func SetDefaultsNodeBucket(obj *NodeBucket) {
+	// example for set default value for NodeBucket
+
 }

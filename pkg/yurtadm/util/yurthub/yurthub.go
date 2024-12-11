@@ -17,6 +17,9 @@ limitations under the License.
 package yurthub
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -68,11 +71,20 @@ func AddYurthubStaticYaml(data joindata.YurtJoinData, podManifestPath string) er
 		"namespace":            data.Namespace(),
 		"image":                data.YurtHubImage(),
 	}
+	if len(data.NodeRegistration().NodePoolName) != 0 {
+		ctx["nodePoolName"] = data.NodeRegistration().NodePoolName
+	}
 
-	yurthubTemplate, err := templates.SubsituteTemplate(data.YurtHubTemplate(), ctx)
+	yurthubTemplate, err := templates.SubstituteTemplate(data.YurtHubTemplate(), ctx)
 	if err != nil {
 		return err
 	}
+
+	yurthubTemplate, err = useRealServerAddr(yurthubTemplate, kubernetesServerAddrs)
+	if err != nil {
+		return err
+	}
+
 	yurthubManifestFile := filepath.Join(podManifestPath, util.WithYamlSuffix(data.YurtHubManifest()))
 	klog.Infof("yurthub template: %s\n%s", yurthubManifestFile, yurthubTemplate)
 
@@ -114,7 +126,7 @@ func CheckYurthubHealthz(yurthubServer string) error {
 		return err
 	}
 	client := &http.Client{}
-	return wait.PollImmediate(time.Second*5, 300*time.Second, func() (bool, error) {
+	return wait.PollUntilContextTimeout(context.Background(), time.Second*5, 300*time.Second, true, func(ctx context.Context) (bool, error) {
 		resp, err := client.Do(req)
 		if err != nil {
 			return false, nil
@@ -134,7 +146,7 @@ func CheckYurthubReadyz(yurthubServer string) error {
 		return err
 	}
 	client := &http.Client{}
-	return wait.PollImmediate(time.Second*5, 300*time.Second, func() (bool, error) {
+	return wait.PollUntilContextTimeout(context.Background(), time.Second*5, 300*time.Second, true, func(ctx context.Context) (bool, error) {
 		resp, err := client.Do(req)
 		if err != nil {
 			return false, nil
@@ -169,4 +181,34 @@ func CleanHubBootstrapConfig() error {
 		klog.Warningf("Clean file %s fail: %v, please clean it manually.", constants.YurtHubBootstrapConfig, err)
 	}
 	return nil
+}
+
+// useRealServerAddr check if the server-addr from yurthubTemplate is default value: 127.0.0.1:6443
+// if yes, we should use the real server addr
+func useRealServerAddr(yurthubTemplate string, kubernetesServerAddrs string) (string, error) {
+	scanner := bufio.NewScanner(bytes.NewReader([]byte(yurthubTemplate)))
+	var buffer bytes.Buffer
+	target := fmt.Sprintf("%v=%v", constants.ServerAddr, constants.DefaultServerAddr)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, target) {
+			line = strings.Replace(line, constants.DefaultServerAddr, kubernetesServerAddrs, -1)
+		}
+		buffer.WriteString(line + "\n")
+	}
+
+	if err := scanner.Err(); err != nil {
+		klog.Infof("Error scanning file: %v\n", err)
+		return "", err
+	}
+	return buffer.String(), nil
+}
+
+func CheckYurtHubItself(ns, name string) bool {
+	if ns == constants.YurthubNamespace &&
+		(name == constants.YurthubYurtStaticSetName || name == constants.YurthubCloudYurtStaticSetName) {
+		return true
+	}
+	return false
 }

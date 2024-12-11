@@ -24,12 +24,14 @@ import (
 
 type NodeRegistration struct {
 	Name          string
+	NodePoolName  string
 	CRISocket     string
 	WorkingMode   string
 	Organizations string
 }
 
 type YurtJoinData interface {
+	CfgPath() string
 	ServerAddr() string
 	JoinToken() string
 	PauseImage() string
@@ -43,8 +45,10 @@ type YurtJoinData interface {
 	NodeRegistration() *NodeRegistration
 	CaCertHashes() []string
 	NodeLabels() map[string]string
-	IgnorePreflightErrors() sets.String
+	IgnorePreflightErrors() sets.Set[string]
 	KubernetesResourceServer() string
 	ReuseCNIBin() bool
 	Namespace() string
+	StaticPodTemplateList() []string
+	StaticPodManifestList() []string
 }

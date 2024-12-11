@@ -35,13 +35,13 @@ const (
 
 type CacheAgent struct {
 	sync.Mutex
-	agents sets.String
+	agents sets.Set[string]
 	store  StorageWrapper
 }
 
 func NewCacheAgents(informerFactory informers.SharedInformerFactory, store StorageWrapper) *CacheAgent {
 	ca := &CacheAgent{
-		agents: sets.NewString(util.DefaultCacheAgents...),
+		agents: sets.New(util.DefaultCacheAgents...),
 		store:  store,
 	}
 	configmapInformer := informerFactory.Core().V1().ConfigMaps().Informer()
@@ -56,7 +56,15 @@ func NewCacheAgents(informerFactory informers.SharedInformerFactory, store Stora
 }
 
 func (ca *CacheAgent) HasAny(items ...string) bool {
-	return ca.agents.HasAny(items...)
+	newAgents := make([]string, 0, len(items))
+	for i := range items {
+		if n := strings.Index(items[i], "/partialobjectmetadata"); n != -1 {
+			newAgents = append(newAgents, items[i][:n])
+		} else {
+			newAgents = append(newAgents, items[i])
+		}
+	}
+	return ca.agents.HasAny(newAgents...)
 }
 
 func (ca *CacheAgent) addConfigmap(obj interface{}) {
@@ -99,8 +107,8 @@ func (ca *CacheAgent) deleteConfigmap(obj interface{}) {
 }
 
 // updateCacheAgents update cache agents
-func (ca *CacheAgent) updateCacheAgents(cacheAgents, action string) sets.String {
-	newAgents := sets.NewString(util.DefaultCacheAgents...)
+func (ca *CacheAgent) updateCacheAgents(cacheAgents, action string) sets.Set[string] {
+	newAgents := sets.New(util.DefaultCacheAgents...)
 	for _, agent := range strings.Split(cacheAgents, sepForAgent) {
 		agent = strings.TrimSpace(agent)
 		if len(agent) != 0 {
@@ -112,7 +120,7 @@ func (ca *CacheAgent) updateCacheAgents(cacheAgents, action string) sets.String 
 	defer ca.Unlock()
 
 	if ca.agents.Equal(newAgents) {
-		return sets.String{}
+		return sets.Set[string]{}
 	}
 
 	// get deleted and added agents
@@ -125,13 +133,13 @@ func (ca *CacheAgent) updateCacheAgents(cacheAgents, action string) sets.String 
 	return deletedAgents
 }
 
-func (ca *CacheAgent) deleteAgentCache(deletedAgents sets.String) {
+func (ca *CacheAgent) deleteAgentCache(deletedAgents sets.Set[string]) {
 	// delete cache data for deleted agents
 	if deletedAgents.Len() > 0 {
-		components := deletedAgents.List()
+		components := deletedAgents.UnsortedList()
 		for i := range components {
 			if err := ca.store.DeleteComponentResources(components[i]); err != nil {
-				klog.Errorf("failed to cleanup cache for deleted agent(%s), %v", components[i], err)
+				klog.Errorf("could not cleanup cache for deleted agent(%s), %v", components[i], err)
 			} else {
 				klog.Infof("cleanup cache for agent(%s) successfully", components[i])
 			}

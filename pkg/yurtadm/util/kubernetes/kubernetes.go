@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -35,6 +36,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/klog/v2"
 
@@ -61,6 +63,9 @@ var (
 	PropagationPolicy = metav1.DeletePropagationBackground
 
 	ErrClusterVersionEmpty = errors.New("cluster version should not be empty")
+
+	// BootstrapTokenRegexp is a compiled regular expression of TokenRegexpString
+	BootstrapTokenRegexp = regexp.MustCompile(constants.BootstrapTokenPattern)
 )
 
 // RunJobAndCleanup runs the job, wait for it to be complete, and delete it
@@ -83,7 +88,7 @@ func RunJobAndCleanup(cliSet *kubernetes.Clientset, job *batchv1.Job, timeout, p
 				}
 
 				if waitForTimeout {
-					klog.Infof("continue to wait for job(%s) to complete until timeout, even if failed to get job, %v", job.GetName(), err)
+					klog.Infof("continue to wait for job(%s) to complete until timeout, even if could not get job, %v", job.GetName(), err)
 					continue
 				}
 				return err
@@ -94,7 +99,7 @@ func RunJobAndCleanup(cliSet *kubernetes.Clientset, job *batchv1.Job, timeout, p
 					Delete(context.Background(), job.GetName(), metav1.DeleteOptions{
 						PropagationPolicy: &PropagationPolicy,
 					}); err != nil {
-					klog.Errorf("fail to delete succeeded servant job(%s): %s", job.GetName(), err)
+					klog.Errorf("could not delete succeeded servant job(%s): %s", job.GetName(), err)
 					return err
 				}
 				return nil
@@ -178,7 +183,7 @@ func CheckAndInstallKubernetesCni(reuseCNIBin bool) error {
 		klog.V(1).Infof("Skip download cni, use already exist file: %s", savePath)
 	}
 
-	if err := os.MkdirAll(constants.KubeCniDir, 0600); err != nil {
+	if err := os.MkdirAll(constants.KubeCniDir, 0755); err != nil {
 		return err
 	}
 	if err := util.Untar(savePath, constants.KubeCniDir); err != nil {
@@ -270,6 +275,21 @@ func SetKubeletService() error {
 	return nil
 }
 
+// EnableKubeletService enable kubelet service
+func EnableKubeletService() error {
+	initSystem, err := initsystem.GetInitSystem()
+	if err != nil {
+		return err
+	}
+
+	if !initSystem.ServiceIsEnabled("kubelet") {
+		if err = initSystem.ServiceEnable("kubelet"); err != nil {
+			return fmt.Errorf("enable kubelet service failed")
+		}
+	}
+	return nil
+}
+
 // SetKubeletUnitConfig configure kubelet startup parameters.
 func SetKubeletUnitConfig() error {
 	kubeletUnitDir := filepath.Dir(constants.KubeletServiceConfPath)
@@ -285,7 +305,7 @@ func SetKubeletUnitConfig() error {
 		}
 	}
 
-	if err := os.WriteFile(constants.KubeletServiceConfPath, []byte(constants.KubeletUnitConfig), 0600); err != nil {
+	if err := os.WriteFile(constants.KubeletServiceConfPath, []byte(constants.KubeletUnitConfig), 0640); err != nil {
 		return err
 	}
 
@@ -319,7 +339,7 @@ func GetKubernetesVersionFromCluster(client kubernetes.Interface) (string, error
 	// Also, the config map really should be KubeadmConfigConfigMap...
 	configMap, err := apiclient.GetConfigMapWithRetry(client, metav1.NamespaceSystem, constants.KubeadmConfigConfigMap)
 	if err != nil {
-		return kubernetesVersion, pkgerrors.Wrap(err, "failed to get config map")
+		return kubernetesVersion, pkgerrors.Wrap(err, "could not get config map")
 	}
 
 	// gets ClusterConfiguration from kubeadm-config
@@ -343,7 +363,7 @@ func GetKubernetesVersionFromCluster(client kubernetes.Interface) (string, error
 	}
 
 	if len(kubernetesVersion) == 0 {
-		return kubernetesVersion, errors.New("failed to get Kubernetes version")
+		return kubernetesVersion, errors.New("could not get Kubernetes version")
 	}
 
 	klog.Infof("kubernetes version: %s", kubernetesVersion)
@@ -370,23 +390,31 @@ func SetKubeadmJoinConfig(data joindata.YurtJoinData) error {
 	ctx := map[string]interface{}{
 		"kubeConfigPath":         KubeadmJoinDiscoveryFilePath,
 		"tlsBootstrapToken":      data.JoinToken(),
-		"ignorePreflightErrors":  data.IgnorePreflightErrors().List(),
+		"ignorePreflightErrors":  data.IgnorePreflightErrors().UnsortedList(),
 		"podInfraContainerImage": data.PauseImage(),
 		"nodeLabels":             constructNodeLabels(data.NodeLabels(), nodeReg.WorkingMode, projectinfo.GetEdgeWorkerLabelKey()),
 		"criSocket":              nodeReg.CRISocket,
 		"name":                   nodeReg.Name,
-	}
-	if nodeReg.CRISocket == constants.DefaultDockerCRISocket {
-		ctx["networkPlugin"] = "cni"
-	} else {
-		ctx["containerRuntime"] = "remote"
-		ctx["containerRuntimeEndpoint"] = nodeReg.CRISocket
 	}
 
 	v1, err := version.NewVersion(data.KubernetesVersion())
 	if err != nil {
 		return err
 	}
+
+	if nodeReg.CRISocket == constants.DefaultDockerCRISocket {
+		ctx["networkPlugin"] = "cni"
+	} else {
+		v124alpha, err := version.NewVersion("1.24.0-alpha.0")
+		if err != nil {
+			return err
+		}
+		if v1.LessThan(v124alpha) {
+			ctx["containerRuntime"] = "remote"
+		}
+		ctx["containerRuntimeEndpoint"] = nodeReg.CRISocket
+	}
+
 	v2, err := version.NewVersion("v1.22.0")
 	if err != nil {
 		return err
@@ -399,7 +427,7 @@ func SetKubeadmJoinConfig(data joindata.YurtJoinData) error {
 		ctx["apiVersion"] = "kubeadm.k8s.io/v1beta3"
 	}
 
-	kubeadmJoinTemplate, err := templates.SubsituteTemplate(constants.KubeadmJoinConf, ctx)
+	kubeadmJoinTemplate, err := templates.SubstituteTemplate(constants.KubeadmJoinConf, ctx)
 	if err != nil {
 		return err
 	}
@@ -489,14 +517,14 @@ func CheckKubeletStatus() error {
 	return nil
 }
 
-// GetYurthubTemplateFromStaticPod get yurthub template from static pod
-func GetYurthubTemplateFromStaticPod(client kubernetes.Interface, namespace, name string) (string, string, error) {
+// GetStaticPodTemplateFromConfigMap get static pod template from configmap
+func GetStaticPodTemplateFromConfigMap(client kubernetes.Interface, namespace, name string) (string, string, error) {
 	configMap, err := apiclient.GetConfigMapWithRetry(
 		client,
 		namespace,
 		name)
 	if err != nil {
-		return "", "", pkgerrors.Wrap(err, "failed to get configmap of yurthub yurtstaticset")
+		return "", "", pkgerrors.Errorf("could not get configmap of %s/%s yurtstaticset, err: %+v", namespace, name, err)
 	}
 
 	if len(configMap.Data) == 1 {
@@ -506,4 +534,28 @@ func GetYurthubTemplateFromStaticPod(client kubernetes.Interface, namespace, nam
 	}
 
 	return "", "", fmt.Errorf("invalid manifest in configmap %s", name)
+}
+
+// GetDefaultClientSet return client set created by /etc/kubernetes/kubelet.conf
+func GetDefaultClientSet() (*kubernetes.Clientset, error) {
+	kubeConfig := filepath.Join(constants.KubeletConfigureDir, constants.KubeletKubeConfigFileName)
+	if _, err := os.Stat(kubeConfig); err != nil && os.IsNotExist(err) {
+		return nil, err
+	}
+
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeConfig)
+	if err != nil {
+		return nil, fmt.Errorf("could not create the clientset based on %s: %w", kubeConfig, err)
+	}
+	cliSet, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return cliSet, nil
+}
+
+// IsValidBootstrapToken returns whether the given string is valid as a Bootstrap Token and
+// in other words satisfies the BootstrapTokenRegexp
+func IsValidBootstrapToken(token string) bool {
+	return BootstrapTokenRegexp.MatchString(token)
 }
